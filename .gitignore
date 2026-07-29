@@ -1,7 +1,8 @@
-# Baked art - regenerate with `python3 build_sheet.py` from sprites.py
+# Baked art - regenerate with `python3 build_sheet.py` from sprites.py.
+# preview.png is NOT here on purpose: README.md embeds it, so it has to be
+# committed or the image is a dead link on GitHub / a fresh clone.
 sprites.png
 sprites.json
-preview.png
 
 # Runtime state - per-machine, recreated by notify.sh / guy.py
 daemon.pid
