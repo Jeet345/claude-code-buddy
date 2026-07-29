@@ -1,0 +1,19 @@
+# Baked art - regenerate with `python3 build_sheet.py` from sprites.py
+sprites.png
+sprites.json
+preview.png
+
+# Runtime state - per-machine, recreated by notify.sh / guy.py
+daemon.pid
+state.json
+prompt_ts
+pos.json
+prefs.json
+guy.log
+
+# Live session data, lives outside the repo by default but DECK_GUY_HOME can
+# point it here during testing
+.deck-guy/
+
+__pycache__/
+*.pyc
