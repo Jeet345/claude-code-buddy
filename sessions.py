@@ -21,6 +21,8 @@ from pathlib import Path
 
 from gi.repository import Gio, GLib
 
+from transcript import TranscriptReader
+
 ROOT = Path(os.environ.get("DECK_GUY_HOME") or Path.home() / ".deck-guy")
 SESSIONS_DIR = ROOT / "sessions"
 STEPS_DIR = ROOT / "steps"          # notify.sh keeps its turn timestamps here
@@ -87,6 +89,19 @@ def describe(tool, inp, cwd=""):
     return ""
 
 
+def _reason(msg):
+    """`Claude needs your permission.` -> `needs your permission`.
+
+    The subject is about to be replaced by the actual step, so the sentence has
+    to lose its own one or it reads `Bash pytest -q - Claude needs...`.
+    """
+    text = str(msg).strip().rstrip(".")
+    for lead in ("Claude Code ", "Claude "):
+        if text.startswith(lead):
+            return text[len(lead):]
+    return text
+
+
 def elide(text, limit=LABEL_MAX):
     text = " ".join(str(text).split())     # collapse any newline that survived
     return text if len(text) <= limit else text[: limit - 1] + "…"
@@ -108,24 +123,39 @@ class Session:
 
     def __init__(self, data):
         d = data if isinstance(data, dict) else {}
-        self.id = str(d.get("session_id") or "?")
-        self.state = d.get("state") or "idle"
-        self.event = d.get("event") or ""
-        self.tool = d.get("tool") or ""
-        self.cwd = d.get("cwd") or ""
-        self.transcript_path = d.get("transcript_path") or ""
-        self.permission_mode = d.get("permission_mode") or ""
+        self.id = _text(d.get("session_id")) or "?"
+        self.state = _text(d.get("state")) or "idle"
+        self.event = _text(d.get("event"))
+        self.tool = _text(d.get("tool"))
+        self.cwd = _text(d.get("cwd"))
+        self.transcript_path = _text(d.get("transcript_path"))
+        self.permission_mode = _text(d.get("permission_mode"))
         self.input = d.get("input") if isinstance(d.get("input"), dict) else {}
         self.ts = _num(d.get("ts"))
         self.prompt_ts = _num(d.get("prompt_ts")) or self.ts
         self.started = _num(d.get("session_started")) or self.ts
         self.heartbeat = _num(d.get("heartbeat")) or self.ts
+        self.metrics = None        # filled in by the store from the transcript
+        # Phase 3. `alert` is the notification_type, or "tool_failed" /
+        # "session_failed" for the two we synthesise. Empty means nothing is
+        # waiting on you, and it is empty on every event that is not an alert -
+        # which is exactly what makes an answered prompt stop shouting.
+        self.alert = _text(d.get("alert"))
+        self.alert_msg = _text(d.get("alert_msg"))
 
     # The hook rewrites the whole file each event, and not every event carries
     # every field, so keep the last non-empty value we were told.
     def inherit(self, old):
         for field in ("cwd", "transcript_path", "permission_mode"):
             if not getattr(self, field) and getattr(old, field, ""):
+                setattr(self, field, getattr(old, field))
+        self.metrics = getattr(old, "metrics", None)
+        if self.state == "alert":
+            # An alert is not a posture. The Notification hook carries no
+            # tool_name and no timings, so taking its event at face value would
+            # blank the very step that is blocked on you and restart its clock.
+            # Keep what the session was doing; the alert rides on top.
+            for field in ("state", "event", "tool", "input", "ts", "prompt_ts"):
                 setattr(self, field, getattr(old, field))
         return self
 
@@ -145,6 +175,29 @@ class Session:
         if not self.tool:
             return "thinking" if self.state == "working" else ""
         return elide(f"{self.tool} {self.target}".strip())
+
+    @property
+    def alert_label(self):
+        """What the alert says, short enough for the bubble. `""` when quiet.
+
+        Claude Code's permission message is the same generic sentence whatever
+        is blocked - literally `"Claude needs your permission"`, with no tool in
+        it - and *what* is blocked is the one thing you want to know from across
+        the room. We already have it: an alert is not a posture, so `inherit`
+        kept the step it is sitting on top of. Splicing the two gives
+        `Bash pytest -q - needs your permission` instead of a sentence that is
+        the same every time and therefore says nothing.
+
+        Only when the message does not already name the tool, so a future
+        version of the CLI that includes it wins instead of being duplicated.
+        """
+        if not self.alert:
+            return ""
+        msg = self.alert_msg or self.alert.replace("_", " ")
+        step = self.label
+        if step and self.tool and self.tool.lower() not in msg.lower():
+            return elide(f"{step} - {_reason(msg)}")
+        return elide(msg)
 
     def elapsed(self, now=None):
         return max(0.0, (now or time.time()) - self.ts)
@@ -171,6 +224,19 @@ def _num(v):
         return 0.0
 
 
+def _text(v):
+    """A string, or nothing at all.
+
+    These files are JSON on disk. `notify.sh` only ever writes strings into
+    them, but nothing stops something else from writing a list, and a field
+    that is the wrong *type* is a different problem from one that is missing:
+    `alert` reached `set.add((id, kind))` and took the whole tick down with an
+    unhashable-type error, and a list `cwd` would have done the same through
+    `Path(cwd)`. Missing is handled everywhere; wrong-typed was not.
+    """
+    return v if isinstance(v, str) else ""
+
+
 # ---------------------------------------------------------------------- store
 class SessionStore:
     """Watches the sessions directory. Calls `on_change` when anything moves.
@@ -182,10 +248,12 @@ class SessionStore:
     with its terminal never writes anything again.
     """
 
-    def __init__(self, on_change=None, stale=STALE_SECS):
+    def __init__(self, on_change=None, stale=STALE_SECS, metrics=True):
         self.on_change = on_change
         self.stale = stale
+        self.metrics = metrics
         self.sessions = {}
+        self._readers = {}         # session id -> TranscriptReader
         self._monitor = None
         self._pending = 0
         self.reload()
@@ -244,8 +312,13 @@ class SessionStore:
                 s.inherit(old)
             if s.state == "ended" or s.stale(now, self.stale):
                 _reap(path, s.id)
+                self._readers.pop(s.id, None)
                 continue
+            self._refresh(s)
             found[s.id] = s
+
+        for dead in set(self._readers) - set(found):
+            del self._readers[dead]
 
         changed = self._digest(found) != self._digest(self.sessions)
         self.sessions = found
@@ -253,9 +326,26 @@ class SessionStore:
             self.on_change(self)
         return found
 
+    def _refresh(self, s):
+        """Tail this session's transcript. No new timer: `reload` already runs
+        on every hook event and on the reaper tick, and a poll with nothing new
+        is one `getsize` and an early return."""
+        if not self.metrics or not s.transcript_path:
+            return
+        reader = self._readers.get(s.id)
+        if reader is None or reader.path != s.transcript_path:
+            reader = self._readers[s.id] = TranscriptReader(s.transcript_path)
+        fresh = reader.poll()
+        s.metrics = fresh if fresh is not None else reader.m
+
     @staticmethod
     def _digest(sessions):
-        return {k: (s.state, s.tool, s.label, s.ts) for k, s in sessions.items()}
+        # Metrics are in the digest so a repaint happens when the numbers move,
+        # not only when he does.
+        return {k: (s.state, s.tool, s.label, s.ts, s.alert, s.alert_msg,
+                    getattr(s.metrics, "context", 0),
+                    round(getattr(s.metrics, "cost", 0.0), 4))
+                for k, s in sessions.items()}
 
     def live(self):
         """Most recently active first. Phase 1 draws only the first."""

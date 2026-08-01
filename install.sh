@@ -1,11 +1,11 @@
 #!/bin/bash
-# Install deck-guy on this machine.
+# Install the buddy on this machine.
 #
 #   ./install.sh            check deps, bake sprites, wire hooks, start him
 #   ./install.sh --check    check deps only, change nothing
 #
 # Safe to re-run. The hook merge keeps every other key in settings.json and
-# replaces only deck-guy's own hook entries, so it is idempotent.
+# replaces only his own hook entries, so it is idempotent.
 
 set -u
 D="$(cd "${0%/*}" && pwd)"
@@ -78,20 +78,41 @@ import json, os, pathlib
 D, S = os.environ["D"], pathlib.Path(os.environ["SETTINGS"])
 cfg = json.loads(S.read_text()) if S.exists() and S.read_text().strip() else {}
 hooks = cfg.setdefault("hooks", {})
-want = {"SessionStart": "--ensure idle", "UserPromptSubmit": "prompt",
-        "PreToolUse": "working", "Stop": "jump", "SessionEnd": "idle"}
+# Every tool-scoped event gets the "*" matcher; Notification matches on
+# notification_type and StopFailure on the error string, so both are left
+# unmatched, which means "all of them".
+want = {"SessionStart": "--ensure idle", "UserPromptSubmit": "--ensure prompt",
+        "PreToolUse": "working", "PostToolUse": "working",
+        "Stop": "jump", "SessionEnd": "idle",
+        # phase 3 - attention
+        "Notification": "alert", "PostToolUseFailure": "alert",
+        "PermissionDenied": "working", "StopFailure": "error"}
+SCOPED = {"PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionDenied"}
+
+def ours(group):
+    """Any entry that runs a notify.sh, wherever it was installed from.
+
+    Matching on the folder name was wrong the moment the folder was renamed:
+    a re-run then appended a second copy of every hook instead of replacing
+    the first, and both fired on every tool call.
+    """
+    for h in group.get("hooks", []):
+        cmd = h.get("command", "").split()
+        if cmd and cmd[0].endswith("/notify.sh"):
+            return True
+    return False
+
 for event, arg in want.items():
     groups = hooks.setdefault(event, [])
-    # Drop any previous deck-guy entry (old path, re-run) - leave everyone else alone.
-    groups[:] = [g for g in groups
-                 if not any("deck-guy" in h.get("command", "")
-                            for h in g.get("hooks", []))]
+    groups[:] = [g for g in groups if not ours(g)]      # leave everyone else alone
     g = {"hooks": [{"type": "command", "command": f"{D}/notify.sh {arg}"}]}
-    if event == "PreToolUse":
+    if event in SCOPED:
         g["matcher"] = "*"
     groups.append(g)
+for event in [e for e, groups in hooks.items() if not groups]:
+    del hooks[event]                                   # an event we no longer use
 S.write_text(json.dumps(cfg, indent=2) + "\n")
-print(f"hooks OK  5 events -> {D}/notify.sh")
+print(f"hooks OK  {len(want)} events -> {D}/notify.sh")
 EOF
 
 # ---- 5. start him ----------------------------------------------------------

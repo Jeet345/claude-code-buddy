@@ -301,7 +301,11 @@ def build_preview(anims, props):
     row_h = ch + gap + 22
     W = pad * 2 + label_w + cols * (cw + gap)
     key_h = 72 + 78 * len([n for n, _ in sprites.MEANING if n in anims])
-    H = pad + hero_h + key_h + 250 + len(costumes) * (ch + 74) + len(anims) * row_h + pad
+    # The "raw frames" section at the bottom draws every animation *and* every
+    # prop. Budgeting only for the animations cut the sheet off partway through
+    # the props, which is how a reference image quietly stops being one.
+    H = (pad + hero_h + key_h + 400 + len(costumes) * (ch + 74)
+         + (len(anims) + len(props)) * row_h + pad * 3)
     img = Image.new("RGB", (W, H), BG)
     d = ImageDraw.Draw(img)
 
@@ -365,8 +369,27 @@ def build_preview(anims, props):
         img.paste(z, (sx + sleeper.width + dx, ground - 40 + dy), z)
     d.text((sx, ground + 12), "asleep after 5 min", font=font(13), fill=MUTED)
 
+    # --- the shoulder badges, on their own line ---
+    # They are the only art the daemon positions itself: not costumes, not
+    # animations, so nothing else on this sheet shows them. The raw-frames dump
+    # at the bottom has the prop, but with no body under it and no caption, it
+    # is two coloured pills rather than an explanation.
+    by = ground + 132
+    d.text((pad, by - 118), "badges — drawn on his shoulder, not a costume: "
+           "a costume says what he is doing, these are about the session",
+           font=font(14), fill=MUTED)
+    for i, (pose, caption) in enumerate([("idle", "waiting on you"),
+                                         ("error", "something failed")]):
+        col = pad + 30 + i * 230
+        body = render(anims[pose]["frames"][0], s)
+        img.paste(body, (col, by - body.height), body)
+        badge = render(props["alert"]["frames"][i], s)
+        # The same anchor the daemon uses: his left shoulder, overhanging.
+        img.paste(badge, (col - 4, by - body.height + 18), badge)
+        d.text((col, by + 12), caption, font=font(13), fill=MUTED)
+
     # --- costumes: body + props composited, exactly as the daemon draws them ---
-    y = ground + 50
+    y = ground + 190
     d.text((pad, y), "costumes — body animation + props pinned per frame",
            font=font(14), fill=MUTED)
     y += 26

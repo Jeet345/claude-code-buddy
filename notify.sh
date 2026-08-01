@@ -7,10 +7,18 @@
 #   working   still busy (refresh, keeps him awake during long tool runs)
 #   jump      task finished; hop count scales with elapsed time
 #   idle      nothing happening
+#   alert     the session is blocked on you, or a tool failed  (phase 3)
+#   error     the session itself failed                        (phase 3)
 #
 # The hook payload on stdin wins over MODE when it carries `hook_event_name`,
 # which is how SessionStart and SessionEnd are told apart - both are wired to
 # `idle` in settings.json and only one of them ends a session.
+#
+# `alert` is not a posture. It says "something wants your attention" and carries
+# no information about what the session was doing, because the Notification hook
+# does not carry any: no tool_name, no timings. The daemon keeps the previous
+# state underneath it and clears the alert on the next event of any other kind,
+# which is what makes an answered prompt stop shouting immediately.
 #
 # One file per session under ~/.deck-guy/sessions/, so several terminals can
 # report at once. This runs on every tool call, so it must be fast and must
@@ -55,18 +63,43 @@ grab() {
     printf -v "g_$k" '%s' "$v"      # printf -v is a builtin: no subshell
 }
 
+# Same idea for a JSON boolean, which `grab` cannot see: it only matches quoted
+# values, and `is_interrupt` is a bare true/false.
+grab_bool() {
+    local k="$1" v=""
+    [[ $payload =~ \"$k\"[[:space:]]*:[[:space:]]*(true|false) ]] && v="${BASH_REMATCH[1]}"
+    printf -v "g_$k" '%s' "$v"
+}
+
 KEYS=(session_id hook_event_name cwd transcript_path tool_name
-      permission_mode file_path command pattern url description)
+      permission_mode file_path command pattern url description
+      notification_type message error)
 for key in "${KEYS[@]}"; do grab "$key"; done
+grab_bool is_interrupt
 
 # Second bite, only if the first told us nothing useful about the target: a tool
-# ran but none of its fields were in the first KB.
-if [ -n "$g_tool_name" ] && [ -z "$g_file_path$g_command$g_pattern$g_url$g_description" ]
-then
+# ran but none of its fields were in the first KB. A failure carries `error`
+# behind the whole of `tool_input`, so a Write that blew up needs the second bite
+# to say why - and a failure is rare enough to pay for it.
+more_needed=0
+[ -n "$g_tool_name" ] && [ -z "$g_file_path$g_command$g_pattern$g_url$g_description" ] &&
+    more_needed=1
+[ "$g_hook_event_name" = PostToolUseFailure ] && [ -z "$g_error" ] && more_needed=1
+# `notification_type` sits behind `message`, and an MCP server can ask you a
+# question a thousand characters long. Without this the type falls off the end
+# of the first kilobyte, the alert field comes out empty, and the badge for the
+# thing actually blocking you never appears at all.
+[ "$g_hook_event_name" = Notification ] && [ -z "$g_notification_type" ] && more_needed=1
+if [ "$more_needed" = 1 ]; then
     IFS= read -r -N 7168 -t 0.2 more 2>/dev/null
     if [ -n "$more" ]; then
         payload+="$more"
         for key in "${KEYS[@]}"; do grab "$key"; done
+        # `is_interrupt` sits directly behind `error`, so if the first bite was
+        # too short for one it was too short for both. Forgetting this one is
+        # not a missing field, it is a wrong one: Esc during a big Write looked
+        # exactly like that Write crashing, and lit a red badge for it.
+        grab_bool is_interrupt
     fi
 fi
 
@@ -84,7 +117,30 @@ case "$g_hook_event_name" in
     PostToolUse)      mode=working ;;
     Stop)             mode=jump    ;;
     SessionEnd)       mode=ended   ;;
+    # Phase 3. PermissionDenied is here for one reason: denying is you answering,
+    # so it has to clear the alert as fast as approving does.
+    Notification)     mode=alert   ;;
+    PermissionDenied) mode=working ;;
+    StopFailure)
+        mode=error
+        g_notification_type=session_failed
+        g_message="${g_error:-the session failed}"
+        ;;
+    PostToolUseFailure)
+        mode=alert
+        g_notification_type=tool_failed
+        g_message="$g_tool_name failed"
+        [ -n "$g_error" ] && g_message="$g_tool_name failed: $g_error"
+        # You pressing Esc is not a failure and must never light a badge - it is
+        # the one "error" you already know about.
+        [ "$g_is_interrupt" = true ] && { mode=working; g_notification_type=""; }
+        ;;
 esac
+
+# The two alert fields belong to alert events only. `message` is a common enough
+# word that a tool_response can carry one, and a stale value here would show up
+# on his shoulder as a warning about nothing.
+[ -n "$g_notification_type" ] || g_message=""
 
 # `--ensure` with no session id is somebody starting the daemon by hand, not a
 # session doing anything: start him, but do not invent a session for him to
@@ -136,18 +192,43 @@ tmp="$SESS/$sid.json.$$"
 [ "$write_session" = 1 ] &&
 printf '{"session_id":"%s","state":"%s","event":"%s","tool":"%s","cwd":"%s",
 "transcript_path":"%s","permission_mode":"%s","ts":%s,"prompt_ts":%s,
-"session_started":%s,"heartbeat":%s,
+"session_started":%s,"heartbeat":%s,"alert":"%s","alert_msg":"%s",
 "input":{"file_path":"%s","command":"%s","pattern":"%s","url":"%s","description":"%s"}}\n' \
     "$sid" "$mode" "$g_hook_event_name" "$g_tool_name" "$g_cwd" \
     "$g_transcript_path" "$g_permission_mode" "$now" "$prompt_ts" \
-    "$started" "$now" \
+    "$started" "$now" "$g_notification_type" "$g_message" \
     "$g_file_path" "$g_command" "$g_pattern" "$g_url" "$g_description" \
     > "$tmp" 2>/dev/null && mv -f "$tmp" "$SESS/$sid.json" 2>/dev/null
 
+# ---------------------------------------------------------------------- trace
+# "Did my hook actually fire?" is otherwise unanswerable: the session file holds
+# only the *last* event, so an event that fires once and is immediately
+# overwritten leaves no trace at all - which is exactly the shape of a hook that
+# is wired wrong. `check_hooks.py --trace` creates the marker; `[ -e ]` and `>>`
+# are both builtins, so the cost when it is off is one stat and nothing else.
+if [ -e "$ROOT/trace" ]; then
+    printf '%s %s %s %s\n' "$now" "${g_hook_event_name:-(none)}" "$mode" \
+        "${g_tool_name:-${g_notification_type:--}}" >> "$ROOT/events.log" 2>/dev/null
+fi
+
 # Start the daemon if it isn't up. Skipped over ssh, where there's no display.
+#
+# This is on every prompt, not only on SessionStart, so a daemon that died at
+# 11am is back by your next prompt instead of staying gone until you open a new
+# session tomorrow. It costs nothing to ask: `[ -r ]`, `read` and `kill -0` are
+# all bash builtins, so the whole check is zero forks.
+#
+# Which makes "Quit" from his menu a problem - it would undo itself. So Quit
+# leaves a marker, and a hook-driven ensure respects it. Running this script by
+# hand clears it, because that is a person explicitly asking for him back, and
+# a hook always carries a session_id while a person typing does not.
 if [ "$ensure" = 1 ] && { [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; }; then
+    if [ -z "$g_session_id" ]; then
+        rm -f "$ROOT/off" 2>/dev/null      # started by hand: he is wanted again
+    fi
     alive=0
-    if [ -r "$PIDFILE" ]; then
+    [ -e "$ROOT/off" ] && alive=1          # quit on purpose; leave him quit
+    if [ "$alive" = 0 ] && [ -r "$PIDFILE" ]; then
         read -r pid < "$PIDFILE"
         [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && alive=1
     fi

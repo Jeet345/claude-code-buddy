@@ -1,17 +1,21 @@
-# Deck Guy — Desktop Creature for Claude Code (Linux)
+# claude-buddy — Desktop Creature for Claude Code (Linux)
 
-**Status:** Phase 4 complete — costumes are live. He wears a different outfit per Claude Code
-tool, waves when clicked, casts a shadow that tightens as he jumps, and faces the way he walks.
-Remaining: phase 5 (optional GNOME Shell extension port), and more props whenever you want them.
-**Last updated:** 2026-07-29
+**Status:** the pet is finished, and so is the HUD's v1 — see `ROADMAP.md` for the phases
+and `phases/` for one document each. This file is about **the pet**: the art pipeline, the
+window, the state machine, and every gotcha hit getting a transparent click-through GTK3
+window to behave on X11 and Wayland. Read it before touching `sprites.py`, `build_sheet.py`
+or the draw path.
+**Last updated:** 2026-08-02
 
-**Built so far:** `sprites.py` (65 frames, 13 animations, 13 props), `build_sheet.py`
-(validator + upscale + shading pass + atlas baker), `sprites.png` (246x541 atlas), `sprites.json`
-(manifest v2, includes per-frame prop anchors), `preview.png` (contact sheet),
-`guy.py` (GTK3 daemon), `notify.sh` (hook writer). Hooks added to `~/.claude/settings.json`;
-backup of the pre-hook config is at `~/.claude/settings.json.bak-deckguy`.
+**Built so far:** `sprites.py` (49 frames, 14 animations, 14 props), `build_sheet.py`
+(validator + upscale + shading pass + atlas baker), `sprites.png` (246x588 atlas),
+`sprites.json` (manifest v2, includes per-frame prop anchors), `preview.png` (contact
+sheet), `guy.py` (GTK3 daemon), `notify.sh` (hook writer), plus the HUD modules listed in
+section 8. Ten hooks in `~/.claude/settings.json`; the pre-hook backup is at
+`~/.claude/settings.json.bak-deckguy`.
 Rebuild art after editing grids with `python3 build_sheet.py`.
 Daemon output goes to `guy.log` (truncated past 256KB), so a crash leaves evidence.
+`python3 check_hooks.py` answers "are the hooks wired, real, and firing".
 
 ### Resolution: two grids, one sprite
 
@@ -55,15 +59,21 @@ not wear.
 | `wave` | You clicked him. | — |
 | `sleep` | Five minutes with no Claude Code activity at all. | — |
 | `wake` | First activity after a nap, then straight into whatever is happening. | — |
+| `error` | A tool failed. Red `!` badge on his shoulder; the next step clears both. | — |
 
 Unlisted tools fall back to `working`, so a new Claude Code tool degrades quietly.
+
+Two badges sit on his shoulders and are **not** costumes, because a costume says what he is
+*doing* and these are about the session: amber `!` on the left when something is waiting on
+you, red `!` when it failed, and a small context pip on the right past 75% full.
 
 ### Adding a new activity (the whole procedure)
 
 1. Draw the prop as an ASCII grid in `PROPS` in `sprites.py`.
 2. Add a `COSTUMES` entry: which body animation to borrow (`base`), how many frames
    (`length`), and one `[col, row]` anchor per frame per prop (`null` hides it that frame).
-3. Map the tool to it in `TOOL_COSTUME` in `guy.py`.
+3. Map the tool to it in `TOOL_COSTUME` in `sprites.py` - it lives beside the art so
+   the daemon and `preview.png` cannot disagree about who wears what.
 4. `python3 build_sheet.py`, check `preview.png`, restart the daemon.
 
 No body art and no draw code. The daemon mirrors anchors automatically when he faces left.
@@ -77,8 +87,10 @@ No body art and no draw code. The daemon mirrors anchors automatically when he f
 - End-to-end: `notify.sh prompt` → 6s → `notify.sh jump` produced 2 hops, 52px airborne
   (38px arc + 15px of leg-tuck in the apex pose).
 - Sleep/wake headless: asleep after 300s idle, poke plays `wake` then lands in the new mode.
-- `notify.sh` costs ~2.5ms per call (100 calls in 0.247s) - safe on every `PreToolUse`.
-- All five hook event names confirmed present in the installed CLI binary (2.1.220).
+- `notify.sh` costs ~2.5ms per call on a small payload, ~4ms on a 3KB one - safe on
+  every `PreToolUse`. Phase 3 wires `PostToolUse` too, so a tool call runs it twice.
+- All ten hook event names confirmed present in the installed CLI binary (2.1.220),
+  which advertises 31 of them - see `phases/phase-3-attention.md` for the full list.
 - Costumes end-to-end: `{"tool_name":"Bash"} | notify.sh working` puts the hard hat on.
   All five costumes plus wave, jump and sleep cycled clean under `--demo`, no exceptions.
 - **Repaint is keyed on the visible frame, not on the bounding box.** Keying on the box was
@@ -156,17 +168,19 @@ env -u LD_LIBRARY_PATH -u GTK_PATH -u GIO_MODULE_DIR python3 guy.py
 
 Also required: `gi.require_version("Gdk", "3.0")` before importing Gdk, or Gdk 4.0 wins and
 the import blows up.
-**Next:** the pet is finished and **HUD phase 1 is built** — he now says what Claude is
-doing, one line above his head, from a per-session file under `~/.deck-guy/`. See
-`phases/phase-1-session-model.md` for what changed on contact with the real hook payloads.
-`ROADMAP.md` holds the ordering, and `phases/` holds one document per phase. v1 is phases
-1-3, so what remains of it is tokens/context/cost, then attention alarms.
+**Next:** the pet is finished and **HUD phases 1, 2 and 3 are built, which is v1** — he says
+what Claude is doing one line above his head, hovering him shows context fill, token burn,
+cost and model read from the transcript JSONL, and a badge on his shoulder says when a
+session is blocked on you. See `phases/phase-1-session-model.md`, `phase-2-metrics.md` and
+`phase-3-attention.md` for what changed on contact with the real data — each one found
+something the spec had wrong. `ROADMAP.md` holds the ordering, and `phases/` holds one
+document per phase. Phase 4 (many sessions, one buddy) is the natural v1.1.
 
 **Resume with:** open this file and say "continue deck-guy from PLAN.md"
 
-**Project lives at `~/Desktop/deck-guy/`.** The hooks in `~/.claude/settings.json` point at
-`~/Desktop/deck-guy/notify.sh` by absolute path — if this folder ever moves again, those five
-hook commands must be rewritten to match or the creature stops reacting.
+**Project lives at `~/Desktop/claude-buddy/`.** The hooks in `~/.claude/settings.json` point
+at `~/Desktop/claude-buddy/notify.sh` by absolute path — if this folder ever moves again,
+re-run `./install.sh` from the new location or all ten hook commands stop reacting.
 
 ---
 
@@ -434,14 +448,23 @@ phase 4) — likely unnecessary.
   README.md        install, requirements, troubleshooting - start here on a new machine
   install.sh       dependency check, art build, hook merge, start
   PLAN.md          this document - the pet, built and running
-  ROADMAP.md       pet -> live HUD, ordering and reasoning (phase 1 built, 2-7 planned)
+  ROADMAP.md       pet -> live HUD, ordering and reasoning (1-3 built = v1, 4-7 planned)
   phases/          one document per HUD phase
   guy.py           GTK3 daemon — window, input shape, state machine, sprite blitter
   sprites.py       ASCII frame grids + palette   ← the art lives here
   build_sheet.py   Pillow: grids → sprites.png atlas (re-run after editing art)
   sessions.py      live sessions on disk: parse, reap, name the target. No GTK
-  bubble.py        the speech bubble and hover panel, drawn at 1x and scaled up
+  bubble.py        speech bubble, hover panel and the context meter. No GTK
+  transcript.py    tails the transcript JSONL from a byte offset. No GTK
+  prices.py        $/token, context windows, a CHECKED date. Expect this to rot
+  alerts.py        escalation, dedupe, acknowledgement, toasts, sound. No GTK
+  dump_transcript.py  what is really in a transcript today - re-run when numbers look wrong
   test_sessions.py python3 test_sessions.py - no display needed
+  test_transcript.py  python3 test_transcript.py - prices, tailing, acceptance
+  test_alerts.py   python3 test_alerts.py - the hook layer, escalation, silence
+  test_interactions.py  drives the real daemon: click/drag/hover in every mode
+  check_hooks.py   audits settings.json, the CLI's event names, and a live trace
+  install.sh       deps check, art build, hook merge (10 events), start
   notify.sh        hook writer; one file per session under ~/.deck-guy/
   pos.json         last drag position
   prefs.json       right-click menu settings, e.g. {"bubble": false}

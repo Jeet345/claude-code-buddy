@@ -30,6 +30,39 @@ PAPER = (0.941, 0.929, 0.894)      # #F0EDE4 - the chef-hat white, so it belongs
 INK = (0.16, 0.11, 0.09)
 DIM = (0.38, 0.30, 0.26)           # the timer, and the panel's labels
 EDGE = (0.494, 0.227, 0.141)       # #7E3A24 - the body outline colour
+GHOST = (0.78, 0.75, 0.70)         # a value we are not sure of, or a stale price
+
+# Meter fill, by how alarming the number is. The thresholds live here rather
+# than at the call site so phase 7's budget bar inherits the same three colours
+# and the same meaning: green is fine, amber is "start thinking about it", red
+# is "this is about to happen to you".
+WARN, HIGH = 0.75, 0.90
+BAR_OK = (0.42, 0.55, 0.33)        # olive, close enough to the palette to belong
+BAR_WARN = (0.80, 0.58, 0.18)
+BAR_HIGH = (0.72, 0.24, 0.18)
+
+
+def bar_colour(fill):
+    return BAR_HIGH if fill >= HIGH else BAR_WARN if fill >= WARN else BAR_OK
+
+
+class Meter:
+    """A full-width bar row. `Panel.set([Meter(0.68), ...])`.
+
+    Its own row rather than a widget inside the value column: at this size a
+    bar with text on top of it is unreadable, and a bar squeezed beside text is
+    too short to read as a proportion. Given a whole row it is honest at a
+    glance, which is the only thing a fill gauge is for.
+    """
+
+    __slots__ = ("fill", "dim")
+
+    def __init__(self, fill, dim=False):
+        self.fill = min(1.0, max(0.0, float(fill or 0.0)))
+        self.dim = bool(dim)          # drawn grey when the number is a guess
+
+    def key(self):
+        return ("meter", round(self.fill, 3), self.dim)
 
 
 def place(centre_x, bottom_y, w, h, win_w):
@@ -116,6 +149,28 @@ def _round_up(n, px):
     return ((int(n) + px - 1) // px) * px
 
 
+BAR_H = 9              # px tall including the 1px track outline
+BAR_MIN = 150          # px; a bar shorter than this cannot show a proportion
+
+
+def _bar(cr, x, y, w, meter):
+    """A track with a fill. Drawn in flat px, not blocks - a meter quantised to
+    the sprite grid jumps in 3% steps and reads as broken rather than stylised."""
+    x, y, w = int(x), int(y), int(w)
+    cr.set_source_rgb(*DIM)
+    cr.rectangle(x, y, w, BAR_H)
+    cr.fill()
+    cr.set_source_rgba(*PAPER, 0.85)
+    cr.rectangle(x + 1, y + 1, w - 2, BAR_H - 2)
+    cr.fill()
+    filled = int((w - 2) * meter.fill)
+    if filled <= 0:
+        return
+    cr.set_source_rgb(*(GHOST if meter.dim else bar_colour(meter.fill)))
+    cr.rectangle(x + 1, y + 1, filled, BAR_H - 2)
+    cr.fill()
+
+
 class _Readout:
     """Shared caching and blitting. Subclasses only build the surface."""
 
@@ -188,8 +243,9 @@ class Bubble(_Readout):
 class Panel(_Readout):
     """The hover readout: label/value rows in the same frame, no tail.
 
-    Phase 2 hangs tokens, cost and model off the same rows, so the only thing
-    that changes then is what `set` is handed.
+    A row is either a `(label, value)` pair, optionally with a third truthy
+    element meaning "draw this greyed out", or a `Meter`, which takes the full
+    inner width.
     """
 
     def __init__(self, scale):
@@ -203,26 +259,46 @@ class Panel(_Readout):
     def visible(self):
         return bool(self.rows)
 
+    def key(self):
+        """What the panel currently shows, for the repaint check upstream.
+
+        The ticking clocks live in here, so this has to be part of the draw key
+        or the panel would only refresh when the creature happened to move.
+        """
+        return tuple(r.key() if isinstance(r, Meter) else tuple(map(str, r))
+                     for r in self.rows)
+
     def _build(self):
-        return self._cached((tuple(map(tuple, self.rows)), self.scale), self._render)
+        return self._cached((self.key(), self.scale), self._render)
+
+    def _text_rows(self):
+        return [r for r in self.rows if not isinstance(r, Meter)]
 
     def _render(self):
         px = self.scale
         row_h = TEXT_H + LEAD
-        label_w = max((_width(r[0]) for r in self.rows), default=0)
-        value_w = max((_width(r[1]) for r in self.rows), default=0)
+        text_rows = self._text_rows()
+        label_w = max((_width(str(r[0])) for r in text_rows), default=0)
+        value_w = max((_width(str(r[1])) for r in text_rows), default=0)
         w = _round_up(PAD * 2 + label_w + GAP * 2 + value_w, px)
+        w = max(w, _round_up(PAD * 2 + BAR_MIN, px))
         h = _round_up(PAD * 2 + row_h * len(self.rows), px)
         surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
         cr = cairo.Context(surf)
         _frame(cr, w, h, px, tail=False)
         _font(cr)
-        for i, (label, value) in enumerate(self.rows):
-            base = PAD + row_h * i + ASCENT
+        for i, row in enumerate(self.rows):
+            top = PAD + row_h * i
+            if isinstance(row, Meter):
+                _bar(cr, PAD, top + (row_h - BAR_H) / 2, w - PAD * 2, row)
+                continue
+            label, value = row[0], row[1]
+            faded = len(row) > 2 and row[2]
+            base = top + ASCENT
             cr.set_source_rgb(*DIM)
             cr.move_to(PAD, base)
             cr.show_text(str(label))
-            cr.set_source_rgb(*INK)
+            cr.set_source_rgb(*(GHOST if faded else INK))
             cr.move_to(PAD + label_w + GAP * 2, base)
             cr.show_text(str(value))
         return surf

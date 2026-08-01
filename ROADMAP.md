@@ -1,8 +1,8 @@
 # Deck Guy — from desktop pet to live HUD
 
-**Status:** phase 1 is built and running; phases 2-7 are still planning only. The pet itself
-(PLAN.md phases 0-4) is done.
-**Written:** 2026-07-29 · **phase 1 landed:** 2026-07-30
+**Status:** **v1 is built and running** — phases 1, 2 and 3. Phases 4-7 are still planning
+only. The pet itself (PLAN.md phases 0-4) is done.
+**Written:** 2026-07-29 · **phase 1:** 2026-07-30 · **phases 2 and 3:** 2026-08-01
 
 The idea: he stops being a pet that reacts to Claude Code and becomes a **window into**
 Claude Code — always visible, always current, and eventually a place you can act from
@@ -22,7 +22,7 @@ external observers** of a Claude Code session. There are exactly two doors:
 
 | Door | Gives you | Costs |
 |---|---|---|
-| **Hooks** | Event-driven truth: session start/end, prompt submitted, every tool call before and after it runs, notifications, stop. Each carries JSON on stdin: `session_id`, `cwd`, `transcript_path`, `tool_name`, `tool_input`, and for `PostToolUse` the result. | Runs on every tool call, so it must stay fast. Already proven at ~2.5ms. |
+| **Hooks** | Event-driven truth: session start/end, prompt submitted, every tool call before and after it runs, notifications, stop. Each carries JSON on stdin: `session_id`, `cwd`, `transcript_path`, `tool_name`, `tool_input`, and for `PostToolUse` the result. | Runs on every tool call, so it must stay fast. ~4ms per call, and phase 3 wires `PostToolUse` as well, so a tool call pays for two. |
 | **Transcript JSONL** | Everything else: model id, per-message token usage (input, output, cache read/write), full tool inputs and outputs, timings. One append-only `.jsonl` per session under `~/.claude/projects/<slugified-cwd>/<session_id>.jsonl`. | Parsing someone else's file format. It is stable in practice but undocumented, so treat every field as optional and never crash on a shape you do not recognise. |
 
 The pairing that makes the HUD work: **hooks tell you *when* to look, the transcript tells
@@ -86,9 +86,9 @@ parsing yet.
 Why first: it is pure hook data, it is the feature you look at every minute, and it forces
 the session-model refactor that everything else needs.
 
-### Phase 2 — Transcript reader: tokens, context, cost, model
+### Phase 2 — Transcript reader: tokens, context, cost, model — **DONE**
 
-> Full spec: [`phases/phase-2-metrics.md`](phases/phase-2-metrics.md)
+> Full spec and what changed on contact: [`phases/phase-2-metrics.md`](phases/phase-2-metrics.md)
 
 
 - Tail the JSONL from a stored byte offset on each hook event.
@@ -102,9 +102,15 @@ the session-model refactor that everything else needs.
 Why second: it is the highest-value information that a terminal does not already show you
 at a glance, and it is read-only — nothing can break a session.
 
-### Phase 3 — Attention: he tells you when you are the blocker
+What it cost to be right: the context window is not in the transcript at all, so the table
+in `prices.py` has to promote itself when a reading exceeds it and grey the number out when
+it does. The two bugs that mattered both produced *plausible* numbers rather than obvious
+breakage — see the phase doc.
 
-> Full spec: [`phases/phase-3-attention.md`](phases/phase-3-attention.md)
+### Phase 3 — Attention: he tells you when you are the blocker — **DONE**
+
+> Full spec and what changed on contact:
+> [`phases/phase-3-attention.md`](phases/phase-3-attention.md)
 
 
 - Hook the `Notification` event: Claude needs permission or input → he **waves**, a badge
@@ -118,6 +124,13 @@ at a glance, and it is read-only — nothing can break a session.
 - Toast on: run finished, tests failed, scheduled agent fired.
 
 Sound stays off by default. It is the fastest way to make a charming thing annoying.
+
+What it cost to be right: the CLI turned out to have 31 hook events, not the five that
+were wired, and two of the new ones (`PostToolUseFailure`, `StopFailure`) are better
+failure signals than reading tool results. It also turned out that there is **no event for
+"the prompt was answered"** — clearing has to be the absence of an alert on the next hook
+of any kind, which is why `PostToolUse` is now wired and why the whole design hangs on an
+alert being orthogonal to the state rather than being one.
 
 ### Phase 4 — Multi-session
 
@@ -191,7 +204,7 @@ information, not personality.
 
 ---
 
-## 4. Proposed v1
+## 4. v1 — built
 
 **Phases 1 + 2 + 3.** He shows what is happening, what it is costing, and shouts when you
 are the one holding things up. That is a complete, coherent product with no dependency on

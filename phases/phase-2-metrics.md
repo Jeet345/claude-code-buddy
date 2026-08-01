@@ -1,6 +1,6 @@
 # Phase 2 — Tokens, context, cost, model
 
-**Status:** not started
+**Status:** **done** (2026-08-01) — built, tested and running.
 **Depends on:** phase 1 (session model, `transcript_path` stored per session)
 **Delivers:** the numbers a terminal does not show you at a glance
 **Data needed:** the transcript JSONL. This is the phase where we start parsing it.
@@ -41,6 +41,60 @@ that dumps the distinct shapes actually present in a real transcript on this mac
 the parser is written against observed reality rather than an assumption. Expect to find,
 per assistant message, a `usage` object with input, output and cache-read/write token
 counts, and a model identifier. Treat every field as optional.
+
+### Schema note — observed 2026-08-01
+
+`python3 dump_transcript.py`, over 7 projects / 2718 assistant lines. Re-run it when the
+numbers start looking wrong; a format change shows up there first.
+
+**Line `type`s seen:** `assistant`, `user`, `attachment`, `last-prompt`, `mode`,
+`ai-title`, `permission-mode`, `system`, `file-history-snapshot`, `file-history-delta`,
+`queue-operation`. Only `assistant` and `system` matter here.
+
+**`assistant` lines** carry the numbers, all under `message`:
+
+```
+message.model                              claude-opus-5 | claude-sonnet-5 | <synthetic>
+message.usage.input_tokens                 int   uncached input this turn
+message.usage.cache_read_input_tokens      int   the bulk of it once warm
+message.usage.cache_creation_input_tokens  int   written this turn, priced higher
+message.usage.cache_creation.ephemeral_5m_input_tokens / ephemeral_1h_input_tokens
+message.usage.output_tokens                int
+message.usage.iterations[]                 same four keys again, per API call
+isSidechain                                bool  true = subagent, not your context
+```
+
+Four notes that changed the design:
+
+- **`<synthetic>` is a real model value** on locally generated messages, with all-zero
+  usage. It must not reach the price table or the model row.
+- **`iterations` was length 1 on every one of 2706 lines**, so whether the top-level usage
+  sums it or mirrors its last entry is untestable here. Top-level is treated as
+  authoritative and `iterations` ignored — revisit if a multi-iteration line ever appears.
+- **`isSidechain: true` is subagent traffic.** It costs money but is not in your context
+  window, so it counts toward burn and cost and never toward the fill bar.
+- **`session_id` (snake) drifts across resumes; `sessionId` (camel) matches the filename.**
+  Neither is needed — `transcript_path` from the hook is the only thing we key on.
+
+**`system` lines** carry `subtype`: `compact_boundary`, `turn_duration`,
+`stop_hook_summary`, `local_command`, `away_summary`. `compact_boundary` is ground truth
+for the fill reading —
+
+```
+compactMetadata.trigger      manual | (auto, presumably)
+compactMetadata.preTokens    251264
+compactMetadata.postTokens   11221
+```
+
+— and gives phase 2 its acceptance test for free: the bar must show roughly `preTokens`
+just before one of these lines and drop to roughly `postTokens` just after.
+
+**The context window is not in the transcript.** Not as a field, not in an error message.
+It has to come from a local table, and the table is already wrong-ish: observed context
+reached **388k on sonnet-5** and **366k on opus-5**, so the `137k / 200k` mock-up above is
+fiction. Those are floors, never the window. Hence `effective_window()`: the table value,
+promoted to the next tier up whenever an observed reading exceeds it, and flagged
+approximate when that promotion happens. A hardcoded 200k would have read 190% full.
 
 **Tail, do not re-read.** Store a byte offset per session; on each hook event, open, seek,
 read to EOF, update the offset. A hook event is the signal that there is something new —
@@ -120,3 +174,79 @@ stale" tooltip rather than silently drifting. Same for context-window sizes.
 
 Per-tool cost attribution, historical cost across sessions (phase 6's recap), budget
 thresholds and warnings (phase 7).
+
+---
+
+## What actually got built
+
+Four new files — `dump_transcript.py`, `prices.py`, `transcript.py`, `test_transcript.py` —
+plus a `Meter` row in `bubble.py`, a `metrics` field on `Session`, and five rows on the
+hover panel. 164 tests, `python3 test_transcript.py`. Three things came out differently
+from the plan above:
+
+**The mock-up's `200k` window was fiction, and finding that out changed the design.**
+Observed context reached 388k on sonnet-5 and 366k on opus-5 during discovery, so a
+hardcoded 200k would have drawn a bar reading 190% full. The window turned out not to be
+in the transcript at all, which is why `prices.window()` ended up with the
+promote-and-flag behaviour rather than a plain lookup: the table is the answer until a
+reading contradicts it, and then the reading wins and the number is drawn grey.
+
+**"Seek near the end and parse backwards" became "seek near the end and parse forwards".**
+Parsing JSONL backwards means finding line boundaries in reverse and buffering an unknown
+number of lines to reach the last one with a `usage` block. Seeking to `size - 256KB`,
+discarding the partial line you land inside, and reading forward to EOF gets the same
+answer in one pass with no reverse scanning. The cost is that a tailed session's running
+totals start mid-file — hence the `partial` flag and the `(partial)` suffix on the tokens
+row, which is honest rather than quietly under-reporting.
+
+**The at-a-glance cue is a badge on his shoulder, not near the readout.** It has to be
+visible when the bubble is off and when nothing is hovered, so it is attached to him.
+
+### Two bugs the tests caught, one they nearly didn't
+
+`poll()` reopened the file every call and never seeked to the stored offset, so every read
+after the first started from byte 0. That double-counted every running total and corrupted
+the held-over partial line. Three separate test failures, one cause.
+
+The second was worse because it produced a *plausible* number. `CHUNK` capped a poll at
+1MB, but `FULL_READ` allowed attach to start at byte 0 of anything under 4MB — so a 3MB
+transcript reported the context of whatever assistant line happened to sit around the 1MB
+mark, and only crept toward the truth one poll at a time. Nothing looked wrong: a
+believable token count, a believable bar. It surfaced only from cross-checking a full read
+against a tailed read of the same file and finding they disagreed (91,078 vs 433,668).
+A poll now drains to EOF, and there is a regression test with a fixture deliberately
+spanning several chunks.
+
+The lesson worth keeping: for a readout like this, *wrong* and *missing* are not equally
+bad. A missing number gets noticed and fixed; a plausible wrong one gets believed. The
+skip-and-count policy protects against missing. Only the cross-check protected against
+plausible.
+
+### Verified against the acceptance criteria
+
+- **Context tracks a real session and drops after a compaction.** `compact_boundary` lines
+  carry `preTokens`/`postTokens`, which is ground truth for free — the reader now reports
+  the boundary, and the test asserts the reading is ~`preTokens` just before it and
+  ~`postTokens` just after. Two real transcripts on this machine exercise it.
+- **Deliberate garbage produces no crash.** Tested twice: a synthetic file of hostile
+  shapes, and a *copy of the largest real transcript* with junk appended.
+- **A 50MB transcript does not stall the daemon.** Fixture built at 50MB: first read pulls
+  256KB in under a millisecond, subsequent polls are offset-based, a poll with nothing new
+  is one `getsize` and an early return.
+- **Cost within a few percent** — this one is *not* verified against Claude Code's own
+  figure, because a subscription session never reports one to compare against. What is
+  verified is the arithmetic: a hand-worked example checked to 1e-9, and cache reads,
+  5-minute writes and 1-hour writes priced separately (lumping them into `input` is wrong
+  by 10x in one direction and 2x in the other).
+- **Idle CPU unchanged.** No new timer: `reload()` already ran on every hook event and on
+  the phase 1 reaper tick, and metrics refresh there. Measured 0.75%, though under an
+  actively-working session rather than a genuinely idle one.
+
+### Schema notes worth carrying into phase 3
+
+`isSidechain` marks subagent traffic: it costs money but is not in your context window, so
+it counts toward burn and cost and never toward the fill bar. `<synthetic>` is a real
+value of `message.model` on locally generated messages and must never reach the price
+table. And an assistant line whose `usage` is the wrong shape is counted as a skipped line
+rather than silently ignored the way an unrelated line type is — that is exactly the shape
+a format change takes, so it should be visible in the `bad` tally.

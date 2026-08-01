@@ -39,10 +39,12 @@ import cairo  # noqa: E402
 
 # Pure data, no GTK. The tool-to-costume table lives with the art it names so that
 # the daemon and preview.png can never disagree about who wears what.
-from sprites import TOOL_COSTUME  # noqa: E402
+from sprites import COSTUMES, TOOL_COSTUME  # noqa: E402
 
-from bubble import Bubble, Panel, place  # noqa: E402
-from sessions import SessionStore, clock  # noqa: E402
+import prices  # noqa: E402
+from alerts import Alerts  # noqa: E402
+from bubble import HIGH, WARN, Bubble, Meter, Panel, bar_colour, place  # noqa: E402
+from sessions import ROOT as SESSIONS_ROOT, SessionStore, clock  # noqa: E402
 
 try:  # GLib.unix_signal_add still works but warns on PyGObject 3.50+
     gi.require_version("GLibUnix", "2.0")
@@ -65,6 +67,7 @@ MODE_HZ = {           # per-posture tick rate; anything absent runs at TICK_HZ
     "idle": 8,        # idle is 4fps, blink 8fps - nothing moves across the screen
     "working": 12,    # costume props top out at 8fps
     "sleep": SLEEP_HZ,
+    "error": 12,      # nothing moves, but the badge on his shoulder pulses
 }
 PATROL_RANGE = 150    # px he will wander either side of home
 PATROL_SPEED = 45     # px per second
@@ -137,8 +140,9 @@ class Creature:
     what stops every new activity from adding a branch to the state machine.
     """
 
-    def __init__(self, sprites, home_x, idle_secs):
+    def __init__(self, sprites, home_x, idle_secs, on_stale=None):
         self.sp = sprites
+        self.on_stale = on_stale  # a working session that stopped answering
         self.x = float(home_x)
         self.home_x = float(home_x)
         self.y_off = 0.0          # px above the ground, supplied by the jump arc
@@ -237,6 +241,11 @@ class Creature:
             self._play(self._work_anim())
         elif mode == "sleep":
             self._play("sleep")
+        elif mode == "error":
+            # Costume off: the outfit says what he is doing, and he is not doing
+            # it any more. The badge is what names the failure.
+            self.costume = None
+            self._play("error")
         else:
             self.costume = None
             self._play("idle")
@@ -246,11 +255,42 @@ class Creature:
         self._cue_into = mode
         self._play("wake")
 
+    @property
+    def slumped(self):
+        """Is he in the error posture, *or* about to fall back into it.
+
+        A failure makes him wave and slump at once, so for the length of the
+        wave the slump is parked in `_cue` and `self.mode` says `cue`. Anything
+        asking "is he showing a failure" has to ask this and not `mode`, or it
+        gets the wrong answer for exactly the half-second after a failure.
+        """
+        return "error" in (self.mode, self._cue, self._cue_into)
+
+    def leave_error(self):
+        """Stop being slumped, including a slump queued behind a one-shot.
+
+        A failure makes him wave *and* slump: the wave is a cue, so `error` is
+        parked in `_cue` until the wave finishes. Clicking during those few
+        frames used to clear the badge and then drop him back into the slump
+        with nothing left to clear it.
+        """
+        if self._cue == "error":
+            self._cue = None
+        if self._cue_into == "error":
+            self._cue_into = None
+        if self.mode == "error":
+            self._enter("idle")
+
     def cue(self, anim):
         """Play a one-shot over the top of whatever he is doing, then go back."""
         if self.mode in ("jump", "sleep", "wake"):
             return
-        self._cue = self.mode
+        if self.mode != "cue":
+            # A cue raised during a cue must not park "cue" as the mode to
+            # return to. It did, and `_enter("cue")` is a mode nothing drives:
+            # he kept the idle frames but stopped blinking, stopped patrolling
+            # and never fell asleep again. Two clicks in a row was enough.
+            self._cue = self.mode
         self.mode = "cue"
         self._play(anim)
 
@@ -287,7 +327,12 @@ class Creature:
         # closed. Without this he keeps cooking at an empty stove.
         if self.mode == "working" and now - self.last_activity > STALE_SECS:
             print(f"working went stale after {now - self.last_activity:.0f}s", flush=True)
-            self._enter("idle")
+            # Phase 3: this is a crash, not a finish. There is no hook for a
+            # terminal that was closed mid-tool - the only evidence is silence,
+            # so he slumps and lets the daemon raise the alert for it.
+            self._enter("error")
+            if self.on_stale:
+                self.on_stale()
 
         # A task that drags on earns the chef hat, per the reference video.
         if (self.mode == "working" and self.costume in (None, "working")
@@ -436,7 +481,7 @@ class Deck(Gtk.Window):
         self.ground_y = self.win_h - GROUND_MARGIN
 
         home = self._load_home(geo.width // 2)
-        self.creature = Creature(self.sp, home, args.idle_secs)
+        self.creature = Creature(self.sp, home, args.idle_secs, on_stale=self.on_stale)
         self._fence()
 
         self.set_app_paintable(True)
@@ -483,9 +528,23 @@ class Deck(Gtk.Window):
         self.panel = Panel(args.scale)
         self._bubble_until = 0.0
         self._hover = False
+        prefs = self._load_prefs()
         # Turning the bubble off leaves the hover panel working, so the
         # information is still one hover away rather than gone.
-        self.show_bubble = bool(self._load_prefs().get("bubble", True))
+        self.show_bubble = bool(prefs.get("bubble", True))
+        # Sound ships off. It is the fastest way to turn a charming thing into
+        # an annoying one, and unlike the badge you cannot ignore it.
+        # No default thresholds repeated here. They were, and changing the ones
+        # in alerts.py then did nothing at all to the running daemon - it kept
+        # toasting at the old 60s while every test and every document said 10.
+        # `Alerts` falls back on its own constants when handed None.
+        self.alerts = Alerts(toast=prefs.get("toast", True),
+                             sound=prefs.get("sound", False),
+                             first=prefs.get("alert_secs"),
+                             repeat=prefs.get("alert_repeat_secs"))
+        self._alert_key = None
+        print(f"alerts: toast={self.alerts.toast} sound={self.alerts.sound} "
+              f"first={self.alerts.first}s repeat={self.alerts.repeat}s", flush=True)
 
         # No polling: notify.sh writes a file per session and the store watches
         # the directory. --demo drives him from the script below instead.
@@ -535,7 +594,10 @@ class Deck(Gtk.Window):
 
     def _save_prefs(self):
         try:
-            PREFS.write_text(json.dumps({"bubble": self.show_bubble}))
+            prefs = self._load_prefs()
+            prefs.update({"bubble": self.show_bubble,
+                          "toast": self.alerts.toast, "sound": self.alerts.sound})
+            PREFS.write_text(json.dumps(prefs, indent=2))
         except OSError:
             pass
 
@@ -548,10 +610,17 @@ class Deck(Gtk.Window):
         """
         s = store.newest()
         if s is None:
-            self.creature.set_mode("idle")
+            # A slump he has not acknowledged outlives the session that caused
+            # it. Resetting him to idle here would erase the only evidence that
+            # anything went wrong the moment the dead session got reaped - and
+            # `slumped` rather than `mode == "error"` because the reap usually
+            # lands during the wave, when the slump is still parked behind it.
+            if not (self.creature.slumped and self.alerts.pending()):
+                self.creature.set_mode("idle")
             return
         now = time.time()
         self.creature.last_activity = now
+        self.alerts.clear_local()          # this session is alive after all
         if s.state == "jump":
             self.creature.set_mode("jump", duration=s.task_secs)
         elif s.state == "working":
@@ -560,8 +629,37 @@ class Deck(Gtk.Window):
             if was != "working":
                 self.creature.working_since = now
             self.creature.set_costume(TOOL_COSTUME.get(s.tool), now)
+        elif s.state == "error":
+            self.creature.set_mode("error")
         elif s.state == "idle":
             self.creature.set_mode("idle")
+
+    def on_stale(self):
+        """A working session stopped answering. Say so rather than shrugging."""
+        self.alerts.local("session_died", "the session stopped answering")
+
+    def on_alerts(self, now):
+        """React to the alert changing. Everything else here only reads it.
+
+        The wave is the cue, not a mode: he keeps whatever costume he had on, so
+        a permission prompt in the middle of a Bash call still looks like a Bash
+        call that is stuck, which is what it is.
+        """
+        live = self.store.live() if self.store else []
+        self.alerts.update(live, now)
+        a = self.alerts.current()
+        key = (a.session_id, a.kind, a.since) if a else None
+        if key == self._alert_key:
+            return
+        self._alert_key = key
+        if a is None:
+            return
+        print(f"alert {a.kind}: {a.message}", flush=True)
+        c = self.creature
+        c.last_activity = now
+        if c.mode == "sleep":
+            c.set_mode("idle")     # being asked a question is a reason to wake up
+        c.cue("wave")
 
     @property
     def readout_y(self):
@@ -582,9 +680,17 @@ class Deck(Gtk.Window):
         on it but him.
         """
         s = self.store.newest() if self.store else None
+        alert = self.alerts.current()
         if not self.show_bubble:
             self.bubble.set("")
             self._bubble_until = 0.0
+        elif alert:
+            # An alert holds the bubble open for as long as it lasts. This is
+            # the one thing here that is not allowed to fade out politely: the
+            # whole feature is that you notice it from the other side of the
+            # room while you are doing something else.
+            self.bubble.set(alert.message, clock(alert.waited(now)))
+            self._bubble_until = now + BUBBLE_LINGER
         elif s and s.state == "working" and s.label:
             self.bubble.set(s.label, clock(s.elapsed(now)))
             self._bubble_until = now + BUBBLE_LINGER
@@ -604,15 +710,162 @@ class Deck(Gtk.Window):
                     ("elapsed", clock(s.elapsed(now)))]
             if s.permission_mode:
                 rows.insert(1, ("mode", s.permission_mode))
-            self.panel.set(rows)
+            self.panel.set(rows + self.alert_rows(alert, now)
+                           + self.metric_rows(s.metrics))
         elif self.args.demo:
             self.panel.set([("project", "deck-guy"), ("mode", "demo"),
                             ("session", clock(now - self._demo_t0)),
                             ("step", self.bubble.text or "idle"),
-                            ("elapsed", clock(now - self._demo_started))])
+                            ("elapsed", clock(now - self._demo_started))]
+                           + self.alert_rows(alert, now)
+                           + self.demo_metric_rows(now))
         else:
             self.panel.set([("project", "-"), ("step", "no session"),
                             ("elapsed", "-")])
+
+    def alert_rows(self, alert, now):
+        """One row, and only when there is something to say. A permanent
+        `attention: none` row would be four more pixels of nothing on every
+        hover, and would train you to stop reading the panel."""
+        rows = []
+        if alert:
+            label = "failed" if alert.failed else "waiting"
+            rows.append((label, f"{alert.message}  ({clock(alert.waited(now))})"))
+        return rows
+
+    @staticmethod
+    def metric_rows(m):
+        """The phase 2 half of the panel, or a single honest line saying why not.
+
+        Every number here is greyed out the moment we are not sure of it: an
+        approximate context window, a price table older than 90 days. A figure
+        drawn in the same black as a known one is a figure someone will quote.
+        """
+        if m is None:
+            return [("context", "-")]
+        if not m.ok:
+            return [("context", "reading transcript…", True)]
+
+        pct = f"{m.fill * 100:.0f}%"
+        approx = "~" if m.window_approx else ""
+        burn = f"{prices.tokens(m.input)} in · {prices.tokens(m.output)} out"
+        rows = [("context", f"{pct}  {prices.tokens(m.context)} / "
+                            f"{approx}{prices.tokens(m.window)}", m.window_approx),
+                Meter(m.fill, dim=m.window_approx),
+                ("tokens", burn + (" (partial)" if m.partial else "")),
+                ("cost", prices.money(m.cost), prices.stale() or not prices.known(m.model))]
+        model = m.model or "unknown"
+        rows.append(("model", f"{model} {m.effort}".strip()
+                     + ("  fast" if m.speed == "fast" else ""), not m.model))
+        return rows
+
+    def context_level(self):
+        """`0` fine, `1` amber, `2` red - the one number allowed out of the panel.
+
+        Everything else in phase 2 stays behind a hover. This does not, because
+        by the time you think to check, a compaction has already happened.
+        """
+        s = self.store.newest() if self.store else None
+        m = getattr(s, "metrics", None) if s else None
+        if m is None or not m.ok or m.window_approx:
+            return 0            # never alarm on a number we are guessing at
+        return 2 if m.fill >= HIGH else 1 if m.fill >= WARN else 0
+
+    _inset_cache = {}
+
+    @classmethod
+    def _body_inset(cls, pixbuf):
+        """`(top, left, right)` transparent margin of a body frame, in px.
+
+        Cached per frame identity: the scan is 11k pixels and only runs when a
+        badge is showing, but the answer never changes for a given frame.
+        """
+        key = id(pixbuf)
+        hit = cls._inset_cache.get(key)
+        if hit is not None:
+            return hit
+        try:
+            data = pixbuf.get_pixels()
+            n, stride = pixbuf.get_n_channels(), pixbuf.get_rowstride()
+            w, h = pixbuf.get_width(), pixbuf.get_height()
+            if n < 4:
+                return (0, 0, 0)                   # no alpha, so no margin
+            top, left, right = h, w, w
+            for row in range(h):
+                base = row * stride
+                for col in range(w):
+                    if data[base + col * n + 3]:
+                        top = min(top, row)
+                        left = min(left, col)
+                        break
+                else:
+                    continue
+                for col in range(w - 1, -1, -1):   # rightmost opaque in this row
+                    if data[base + col * n + 3]:
+                        right = min(right, w - 1 - col)
+                        break
+            result = (0 if top >= h else top,
+                      0 if left >= w else left, 0 if right >= w else right)
+        except Exception:                          # a pixbuf shape we do not know
+            result = (0, 0, 0)
+        cls._inset_cache[key] = result
+        return result
+
+    def draw_context_pip(self, cr, c):
+        """A small badge at his shoulder. Deliberately not a costume: a costume
+        says what he is doing, and this is a warning about the session."""
+        level = self.context_level()
+        if not level:
+            return
+        px = self.args.scale
+        # His sheet cell is 120x96 but the body inside it is 90x63, and `bbox`
+        # returns the cell. Anchoring to the cell put the badge 33px above his
+        # head in empty sky, looking like an unrelated notification - the same
+        # mistake the bubble made in phase 1. Find the actual pixels instead.
+        bx, by, bw, _ = c.bbox(self.ground_y)
+        pad_top, _, pad_right = self._body_inset(c.pixbuf)
+        x = int(bx + bw - pad_right - px * 2)
+        y = int(by + pad_top)
+        cr.set_source_rgb(0.16, 0.11, 0.09)
+        cr.rectangle(x - px, y - px, px * 4, px * 4)
+        cr.fill()
+        cr.set_source_rgb(*bar_colour(1.0 if level == 2 else WARN))
+        cr.rectangle(x, y, px * 2, px * 2)
+        cr.fill()
+
+    def draw_alert_badge(self, cr, c, now):
+        """The `!` on his left shoulder. The context pip has the right one.
+
+        Two badges, two meanings, two corners: context is a slow number you
+        watch, an alert is a thing that just happened. Sharing a corner would
+        make them look like two states of one indicator.
+        """
+        a = self.alerts.current()
+        if a is None:
+            return
+        pix, _, _ = self.sp.prop_frame("alert", a.frame, 1)
+        bx, by, _, _ = c.bbox(self.ground_y)
+        pad_top, pad_left, _ = self._body_inset(c.pixbuf)
+        x = int(bx + pad_left - pix.get_width() * 0.45)
+        y = int(by + pad_top - pix.get_height() * 0.3)
+        # A slow pulse while it is unanswered. Not a flash: this can sit there
+        # for twenty minutes, and anything faster than this is unliveable.
+        alpha = 0.72 + 0.28 * (0.5 + 0.5 * math.sin(now * 2.4))
+        self._blit(cr, pix, x, y, alpha=alpha)
+
+    def demo_metric_rows(self, now):
+        """--demo has no transcript, so fake a bar that sweeps the thresholds.
+
+        Without this there is no way to eyeball the amber and red states short
+        of burning a real session down to its last tokens.
+        """
+        fill = (now / 12.0) % 1.0
+        return [("context", f"{fill * 100:.0f}%  "
+                            f"{prices.tokens(int(fill * 1_000_000))} / 1.00M"),
+                Meter(fill),
+                ("tokens", "1.24M in · 38k out"),
+                ("cost", prices.money(3.41)),
+                ("model", "claude-opus-5 high")]
 
     def readout_alpha(self, now):
         left = self._bubble_until - now
@@ -631,7 +884,8 @@ class Deck(Gtk.Window):
     DEMO = [
         ("idle", 4.0), ("patrol", 6.0), ("wave", 2.0),
         ("read", 5.0), ("write", 5.0), ("build", 5.0), ("scan", 5.0), ("cook", 7.0),
-        ("jump", 3.0), ("idle", 2.0), ("sleep", 4.0), ("idle", 3.0),
+        ("jump", 3.0), ("alert", 5.0), ("error", 5.0),
+        ("idle", 2.0), ("sleep", 4.0), ("idle", 3.0),
     ]
     DEMO_LABELS = {
         "read": "Read sessions.py", "write": "Edit src/auth.py",
@@ -651,14 +905,29 @@ class Deck(Gtk.Window):
         if label:
             self.bubble.set(label)
             self._bubble_until = now + hold
-        if mode == "jump":
+        if mode not in ("alert", "error"):
+            self.alerts.clear_local()
+        if mode == "alert":
+            # A fake alert, because the real one needs a real permission prompt
+            # and there is no way to stage one of those on demand.
+            self.alerts.local("permission_prompt",
+                              "Claude needs your permission to use Bash", now)
+        elif mode == "error":
+            self.alerts.local("session_failed", "Bash failed: exit 2", now)
+            self.creature.set_mode("error")
+        elif mode == "jump":
             # cycle the three celebration sizes so all of them get seen
             self.creature.set_mode("jump", duration=[2, 12, 45][self._demo_step % 3])
         elif mode == "patrol":
             self.creature.start_patrol(now, hold)
         elif mode == "wave":
             self.creature.cue("wave")
-        elif self.sp.has(mode):        # a costume name
+        elif mode in COSTUMES:
+            # `COSTUMES`, not `sp.has(mode)`: every costume is an animation but
+            # not every animation is a costume, so the loose test caught `idle`
+            # and `sleep` too and dressed him up as them. It looked close enough
+            # to be missed - except that `sleep` never entered the sleep *mode*,
+            # so the zzz trail never appeared in the demo at all.
             self.creature.set_mode("working")
             self.creature.set_costume(mode, now)
         else:
@@ -674,6 +943,9 @@ class Deck(Gtk.Window):
         if self.args.demo:
             self.run_demo(now)
         self.creature.update(dt, now)
+        # Escalation is a clock, not an event, so it has to be looked at every
+        # tick. There is no new timer: this is the one that was already running.
+        self.on_alerts(now)
         self.update_readout(now)
 
         # Repaint on what is actually visible, not on movement alone: he breathes and
@@ -682,7 +954,9 @@ class Deck(Gtk.Window):
         # means a still idle creature repaints 4 times a second, not 30.
         c = self.creature
         bbox = c.bbox(self.ground_y)
-        if c.mode == "sleep":
+        if self._alert_key is not None:
+            phase = int(now * 12)      # the badge pulses, so it needs its own clock
+        elif c.mode == "sleep":
             phase = int(now * SLEEP_HZ)
         elif c.puff_until > now:
             phase = int(now * 20)
@@ -692,8 +966,8 @@ class Deck(Gtk.Window):
             phase = 0
         # The readout carries a ticking timer, so it goes in the key too - otherwise
         # the elapsed count would only redraw when he happened to move.
-        readout = (self.bubble.text, self.bubble.timer, self.panel.visible,
-                   round(self.readout_alpha(now), 2))
+        readout = (self.bubble.text, self.bubble.timer, self.panel.key(),
+                   round(self.readout_alpha(now), 2), self.context_level())
         rect = self.readout_rect(now)
         key = (c.anim, c.frame, c.facing, bbox, phase, readout)
         if key != getattr(self, "_last_key", None):
@@ -780,6 +1054,9 @@ class Deck(Gtk.Window):
             self._blit(cr, puff, x + w // 2 - puff.get_width() // 2,
                        y - puff.get_height() // 2, alpha=1.0 - t)
 
+        self.draw_context_pip(cr, c)
+        self.draw_alert_badge(cr, c, now)
+
         # Readout last, on top of everything. The panel replaces the bubble rather
         # than stacking under it: the bubble's line is already the panel's `step`
         # row, and stacking would need a strip half again as tall.
@@ -836,6 +1113,13 @@ class Deck(Gtk.Window):
             dragged, self._drag = self._dragged, None
             if dragged:
                 self._save_home()
+            elif self.alerts.ack():
+                # A click already meant "I am here", so acknowledging is not a
+                # new gesture - the badge just gets to the click first. He still
+                # waves, because a click that does nothing visible feels broken.
+                print("alert acknowledged", flush=True)
+                self.creature.leave_error()
+                self.creature.cue("wave")
             else:
                 self.creature.cue("wave")   # a click, not a drag
         return True
@@ -845,12 +1129,46 @@ class Deck(Gtk.Window):
         self._save_prefs()
         print(f"speech bubble {'on' if self.show_bubble else 'off'}", flush=True)
 
+    def on_toggle_sound(self, item):
+        self.alerts.sound = item.get_active()
+        self._save_prefs()
+        print(f"alert sound {'on' if self.alerts.sound else 'off'}", flush=True)
+
+    def on_toggle_toast(self, item):
+        self.alerts.toast = item.get_active()
+        self._save_prefs()
+        print(f"desktop toasts {'on' if self.alerts.toast else 'off'}", flush=True)
+
+    def on_quit(self, _item):
+        """Quit, and stay quit.
+
+        `notify.sh --ensure` now runs on every prompt so a daemon that died
+        comes back by itself, which would otherwise make this menu item mean
+        "go away for thirty seconds". The marker says a person asked; running
+        `./notify.sh --ensure idle` by hand removes it again.
+        """
+        try:
+            SESSIONS_ROOT.mkdir(parents=True, exist_ok=True)
+            (SESSIONS_ROOT / "off").touch()
+        except OSError:
+            pass
+        print("quit by menu; --ensure will leave him alone until asked", flush=True)
+        Gtk.main_quit()
+
     def menu(self, ev):
         m = Gtk.Menu()
         toggle = Gtk.CheckMenuItem(label="Speech bubble")
         toggle.set_active(self.show_bubble)
         toggle.connect("toggled", self.on_toggle_bubble)
         m.append(toggle)
+        toast = Gtk.CheckMenuItem(label="Desktop notifications")
+        toast.set_active(self.alerts.toast)
+        toast.connect("toggled", self.on_toggle_toast)
+        m.append(toast)
+        sound = Gtk.CheckMenuItem(label="Alert sound")
+        sound.set_active(self.alerts.sound)
+        sound.connect("toggled", self.on_toggle_sound)
+        m.append(sound)
         m.append(Gtk.SeparatorMenuItem())
 
         items = [
@@ -863,7 +1181,7 @@ class Deck(Gtk.Window):
                 self.creature.set_mode("working"), self.creature.set_costume(n)))
             for name in ("read", "write", "build", "scan", "cook")
         ]
-        items.append(("Quit", lambda *_: Gtk.main_quit()))
+        items.append(("Quit", self.on_quit))
         for label, fn in items:
             item = Gtk.MenuItem(label=label)
             item.connect("activate", fn)
@@ -904,12 +1222,12 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--demo", action="store_true", help="cycle every state, ignore hooks")
     p.add_argument("--scale", type=int, default=3, help="pixel size (default 3)")
-    # 340 is the sum of the parts at scale 3: body (96), the tallest hop (46), the
-    # gap above his head (10), and the hover panel that replaces the bubble (~160
-    # at five rows), with room for the rows phase 2 adds. Everything above him is
+    # 400 is the sum of the parts at scale 3: body (96), the tallest hop (46), the
+    # gap above his head (10), and the hover panel that replaces the bubble (198
+    # at the ten rows phase 2 brought), plus slack. Everything above him is
     # transparent and click-through, so spare height costs nothing but window
     # size, and the panel clamps if it ever wants more than there is.
-    p.add_argument("--height", type=int, default=340, help="strip height in px")
+    p.add_argument("--height", type=int, default=400, help="strip height in px")
     p.add_argument("--idle-secs", type=int, default=300, help="seconds before he sleeps")
     p.add_argument("--no-shape", action="store_true", help="debug: skip click-through")
     p.add_argument("--no-log", action="store_true", help="keep output on the terminal")
