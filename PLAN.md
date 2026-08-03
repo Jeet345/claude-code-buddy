@@ -151,6 +151,38 @@ stale pid and the other machine's `home_x` come along for the ride.
   `python3 ./guy.py`. Match on `guy\.py` or read `daemon.pid`.
 - Beware `pkill -f` patterns that also match your own shell's command line.
 
+### GOTCHA: the GTK API you call depends on the PyGObject you happen to have
+
+On a box with **PyGObject 3.48** the daemon never appeared and left no evidence at all:
+
+```
+AttributeError: 'gi.repository.GLibUnix' object has no attribute 'signal_add'
+```
+
+`GLib.unix_signal_add` warns as deprecated on 3.50+, and the replacement is
+`GLibUnix.signal_add` — but 3.48 ships the GLibUnix typelib carrying only
+`signal_add_full`. The guard around it caught `ValueError, ImportError`, which is what a
+*missing* typelib raises; a typelib that exists and is a version older raises
+`AttributeError` and went straight through. Rule: **probe with `getattr`, never assume a
+name exists because the current version has it.** The same applies to the other three
+version-split APIs in `guy.py`, all handled the same way:
+
+| API | Old | New |
+|---|---|---|
+| unix signal handler | `GLib.unix_signal_add` | `GLibUnix.signal_add` / `signal_add_full` |
+| monitor rect | `Gdk.Screen.get_monitor_geometry` | `Gdk.Display.get_primary_monitor` (3.22+) |
+| monitor hotplug | `Gdk.Screen::size-changed` | `Gdk.Display::monitor-added` (3.22+) |
+| context menu | `Gtk.Menu.popup` | `Gtk.Menu.popup_at_pointer` (3.22+) |
+
+Two things made a five-line fix cost an hour, and both are now fixed as well:
+
+- **`notify.sh` sent the daemon's output to `/dev/null`**, and `guy.py` only redirects to
+  `guy.log` once it is running — so an import-time crash was completely invisible. It now
+  goes to `guy.crash.log`, truncated per attempt, empty whenever he starts properly.
+- **`install.sh`'s dependency check imported `gi` and `cairo`, not `guy.py`.** It passed
+  happily on a machine where the daemon could not start. It now imports the real module,
+  which needs no display and fails loudly at install time.
+
 ### GOTCHA: snap environment breaks GTK
 
 Launching from a shell with a snap-polluted environment fails with:
@@ -447,6 +479,7 @@ phase 4) — likely unnecessary.
 ~/Desktop/deck-guy/
   README.md        install, requirements, troubleshooting - start here on a new machine
   install.sh       dependency check, art build, hook merge, start
+  uninstall.sh     stop, unwire hooks, clear state (--purge, --dry-run)
   PLAN.md          this document - the pet, built and running
   ROADMAP.md       pet -> live HUD, ordering and reasoning (1-3 built = v1, 4-7 planned)
   phases/          one document per HUD phase
@@ -465,6 +498,7 @@ phase 4) — likely unnecessary.
   test_interactions.py  drives the real daemon: click/drag/hover in every mode
   check_hooks.py   audits settings.json, the CLI's event names, and a live trace
   install.sh       deps check, art build, hook merge (10 events), start
+  uninstall.sh     the reverse: stop by pid, strip his 10 hooks, rm ~/.deck-guy
   notify.sh        hook writer; one file per session under ~/.deck-guy/
   pos.json         last drag position
   prefs.json       right-click menu settings, e.g. {"bubble": false}

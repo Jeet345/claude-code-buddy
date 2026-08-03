@@ -11,6 +11,7 @@ prompt_ts
 pos.json
 prefs.json
 guy.log
+guy.crash.log
 
 # Live session data, lives outside the repo by default but DECK_GUY_HOME can
 # point it here during testing

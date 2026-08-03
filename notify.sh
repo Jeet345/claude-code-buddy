@@ -239,8 +239,14 @@ if [ "$ensure" = 1 ] && { [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; }; the
         # GDK_BACKEND=x11 forces XWayland on Wayland sessions: GTK3's move(),
         # keep_above() and input_shape_combine_region() are all no-ops on the
         # native Wayland backend.
+        # Output goes to guy.crash.log, not /dev/null: guy.py redirects its own
+        # output to guy.log as its first act, so anything that lands here is a
+        # failure from *before* that - an import error on a PyGObject this code
+        # has not met, a missing typelib - which otherwise dies silently and is
+        # indistinguishable from "nothing has happened yet". The file is
+        # truncated, not appended, so it always describes the latest attempt.
         nohup setsid --fork env -u LD_LIBRARY_PATH -u GTK_PATH -u GIO_MODULE_DIR \
-            GDK_BACKEND=x11 python3 "$D/guy.py" >/dev/null 2>&1 </dev/null &
+            GDK_BACKEND=x11 python3 "$D/guy.py" >"$D/guy.crash.log" 2>&1 </dev/null &
         disown 2>/dev/null
     fi
 fi

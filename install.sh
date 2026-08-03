@@ -35,7 +35,21 @@ except Exception as e:
     print(f"  {type(e).__name__}: {e}", file=sys.stderr)
     sys.exit(1)
 print(f"deps OK   gtk {Gtk.get_major_version()}.{Gtk.get_minor_version()}"
+      f"   pygobject {gi.__version__}"
       f"   pillow {pil}   python {sys.version.split()[0]}")
+EOF
+
+# The check above proves the libraries are there; it does not prove *this code*
+# imports against the versions of them on this box. It did not, once: PyGObject
+# 3.48 carries the GLibUnix typelib without the signal_add that 3.50 added, and
+# the daemon died at import with its traceback going to /dev/null. Importing the
+# real module needs no display and catches that class of failure here, loudly,
+# instead of at 3am as "he just never appeared".
+D="$D" $PY - <<'EOF' || die "guy.py does not import on this machine - see the traceback above"
+import os, sys
+sys.path.insert(0, os.environ["D"])
+import guy  # noqa: F401
+print("import OK  guy.py and its modules load against these versions")
 EOF
 
 [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] || say "warn: no DISPLAY - he cannot draw over ssh"
@@ -122,6 +136,6 @@ sleep 1
 if [ -r "$D/daemon.pid" ] && kill -0 "$(cat "$D/daemon.pid")" 2>/dev/null; then
     say "running   pid $(cat "$D/daemon.pid")   log: $D/guy.log"
 else
-    say "warn: daemon did not start - run '$PY $D/guy.py --no-log' to see why"
+    say "warn: daemon did not start - read $D/guy.crash.log, or run '$PY $D/guy.py --no-log'"
 fi
 say "Restart Claude Code to load the hooks."

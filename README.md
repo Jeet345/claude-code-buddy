@@ -38,6 +38,12 @@ any art change.
 | Pillow | bakes the sprite atlas | `python3-pil` |
 | X11, or Wayland with XWayland | positioning and click-through | `xwayland` |
 
+Any GTK 3.x and any PyGObject: the four APIs that moved between versions (the unix signal
+handler, monitor geometry, monitor hotplug, and the context menu popup) are probed at
+runtime rather than assumed, so 3.48 and 3.50+ both work. `install.sh` imports `guy.py`
+during its check, so a version this code has not met fails at install time with a
+traceback instead of silently never appearing.
+
 **`python3-gi-cairo` is the one people miss.** `python3-cairo` alone is not enough — without
 the bridge every frame raises `KeyError: 'could not find foreign type Region'` and nothing
 draws. It is a separate package.
@@ -83,7 +89,9 @@ Restart Claude Code afterwards — hooks load at session start.
 
 That script is safe to re-run and does five things:
 
-1. checks the dependencies, by making the exact cairo call that fails without the bridge
+1. checks the dependencies — the exact cairo call that fails without the bridge, then an
+   import of `guy.py` itself, which is the only thing that proves *this code* runs against
+   *these* library versions (needs no display)
 2. stops any running copy **by pid** and clears stale session state
 3. bakes `sprites.png`, `sprites.json` and `preview.png` from `sprites.py`
 4. merges ten hook entries into `~/.claude/settings.json`, backing it up first
@@ -346,8 +354,21 @@ two creatures drawn on top of each other. Kill the pid in the file.
 ### Uninstall
 
 ```bash
-kill "$(cat daemon.pid)"
-cp ~/.claude/settings.json.bak-deckguy ~/.claude/settings.json   # or delete the 10 hook entries
+./uninstall.sh              # stop him, unwire the hooks, clear ~/.deck-guy
+./uninstall.sh --dry-run    # print what that would do and change nothing
+./uninstall.sh --purge      # also his position, prefs, log and the baked art
+```
+
+It removes **only** his ten hook entries — recognised by the `notify.sh` at the end of the
+command, same rule as the install — and leaves every other key and every other hook in
+`settings.json` alone, with a backup at `settings.json.bak-deckguy-uninstall` taken only on
+a run that actually removes something. Restart Claude Code afterwards so it stops loading
+them.
+
+A plain run keeps `pos.json` and `prefs.json`, so reinstalling puts him back where he was
+with the same switches. It never deletes the folder — do that yourself:
+
+```bash
 rm -rf claude-buddy
 ```
 
@@ -363,7 +384,8 @@ is how both of the last two real bugs were found.
 | `KeyError: could not find foreign type Region` | `python3-gi-cairo` missing |
 | `Couldn't find foreign struct converter for 'cairo.Context'` | same |
 | `symbol lookup error: /snap/core20/.../libpthread.so.0` | snap environment; launch with the `env -u` prefix above |
-| Nothing appears at all | no `DISPLAY`/`WAYLAND_DISPLAY` (ssh), or the daemon died — run `guy.py --no-log` and read the traceback |
+| Nothing appears at all | read **`guy.crash.log`** first — it holds anything the daemon printed before it got as far as opening `guy.log`, which is where an import error lands. Empty file and still nothing: no `DISPLAY`/`WAYLAND_DISPLAY` (ssh), or run `guy.py --no-log` and read the traceback |
+| `AttributeError: 'GLibUnix' object has no attribute 'signal_add'` | a build from before the PyGObject 3.48 fix — `git pull`, or see the version table in `PLAN.md` |
 | He is behind other windows, or in the wrong place, or eats clicks | running on native Wayland instead of XWayland; check `GDK_BACKEND=x11` reached him |
 | Two of him | `daemon.pid` was deleted while he was alive; `pkill -f 'guy\.py'` and start once |
 | He never reacts to Claude | hooks not loaded (restart Claude Code), or the paths in `settings.json` point at the old folder |
@@ -399,6 +421,7 @@ test_interactions.py  clicking him at the worst possible moment  (needs a displa
 check_hooks.py   are the hooks wired, real, and actually firing
 notify.sh        the hook target; writes a session file, starts the daemon
 install.sh       dependency check, art build, hook wiring
+uninstall.sh     stop him, unwire the hooks, clear state  (--purge, --dry-run)
 PLAN.md          how the pet is built and why, plus every gotcha hit
 ROADMAP.md       the plan to turn him into a live Claude Code HUD
 phases/          one document per HUD phase (1-3 built = v1, 4-7 specced)

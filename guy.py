@@ -33,7 +33,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import Gdk, GdkPixbuf, GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, GdkPixbuf, GLib, GObject, Gtk  # noqa: E402
 
 import cairo  # noqa: E402
 
@@ -46,13 +46,33 @@ from alerts import Alerts  # noqa: E402
 from bubble import HIGH, WARN, Bubble, Meter, Panel, bar_colour, place  # noqa: E402
 from sessions import ROOT as SESSIONS_ROOT, SessionStore, clock  # noqa: E402
 
-try:  # GLib.unix_signal_add still works but warns on PyGObject 3.50+
-    gi.require_version("GLibUnix", "2.0")
-    from gi.repository import GLibUnix
+def _unix_signal_add():
+    """Whichever of the three spellings this PyGObject actually has.
 
-    unix_signal_add = GLibUnix.signal_add
-except (ValueError, ImportError):  # pragma: no cover - older PyGObject
-    unix_signal_add = GLib.unix_signal_add
+        3.50+   GLibUnix.signal_add
+        3.48    GLibUnix typelib is present but only carries signal_add_full
+        older   no GLibUnix at all; GLib.unix_signal_add is the one that exists
+                (it still works everywhere, it only warns as deprecated on 3.50+)
+
+    Every failure mode here is an exception at *import* time, and an import that
+    raises is the worst kind of failure this daemon has: notify.sh starts him
+    detached, and start_log() has not redirected anything yet, so the traceback
+    goes nowhere and he simply never appears. Hence: no attribute is assumed to
+    exist, and the catch-all names AttributeError as well.
+    """
+    try:
+        gi.require_version("GLibUnix", "2.0")
+        from gi.repository import GLibUnix
+    except (ValueError, ImportError):  # pragma: no cover - depends on the box
+        return GLib.unix_signal_add
+    for name in ("signal_add", "signal_add_full"):
+        fn = getattr(GLibUnix, name, None)
+        if fn is not None:
+            return fn
+    return GLib.unix_signal_add  # pragma: no cover - typelib with neither
+
+
+unix_signal_add = _unix_signal_add()
 
 HERE = Path(__file__).parent
 POS = HERE / "pos.json"
@@ -468,15 +488,39 @@ class Creature:
         return out
 
 
+def primary_geometry():
+    """Rect of the monitor he lives on, across GTK3's three monitor APIs.
+
+    get_primary_monitor() on Gdk.Display is 3.22+; before that the same two
+    questions were asked of Gdk.Screen. A multi-head box with no primary set
+    answers None to the first one, which is why get_monitor(0) is a fallback and
+    not an else-branch.
+    """
+    display = Gdk.Display.get_default()
+    monitor = None
+    if display is not None:
+        get_primary = getattr(display, "get_primary_monitor", None)
+        if get_primary is not None:
+            monitor = get_primary()
+        if monitor is None and hasattr(display, "get_monitor"):
+            monitor = display.get_monitor(0)
+    if monitor is not None:
+        return monitor.get_geometry()
+
+    screen = display.get_default_screen() if display else Gdk.Screen.get_default()
+    idx = 0
+    if hasattr(screen, "get_primary_monitor"):
+        idx = max(screen.get_primary_monitor(), 0)
+    return screen.get_monitor_geometry(idx)
+
+
 class Deck(Gtk.Window):
     def __init__(self, args):
         super().__init__(type=Gtk.WindowType.TOPLEVEL)
         self.args = args
         self.sp = Sprites(args.scale)
 
-        display = Gdk.Display.get_default()
-        monitor = display.get_primary_monitor() or display.get_monitor(0)
-        geo = monitor.get_geometry()
+        geo = primary_geometry()
         self.win_w, self.win_h = geo.width, args.height
         self.ground_y = self.win_h - GROUND_MARGIN
 
@@ -510,8 +554,16 @@ class Deck(Gtk.Window):
         self.connect("motion-notify-event", self.on_motion)
         self.connect("leave-notify-event", self.on_leave)
         self.connect("destroy", lambda *_: Gtk.main_quit())
-        display.connect("monitor-added", lambda *_: self._refit())
-        display.connect("monitor-removed", lambda *_: self._refit())
+        # monitor-added/removed arrived with the monitor API in 3.22. Where they
+        # do not exist, Gdk.Screen's size-changed is the older equivalent and
+        # covers the case that actually matters: the strip is the wrong width
+        # after a resolution change.
+        display = Gdk.Display.get_default()
+        if display is not None and GObject.signal_lookup("monitor-added", type(display)):
+            display.connect("monitor-added", lambda *_: self._refit())
+            display.connect("monitor-removed", lambda *_: self._refit())
+        else:  # pragma: no cover - GTK < 3.22
+            self.get_screen().connect("size-changed", lambda *_: self._refit())
 
         self._drag = None
         self._dragged = False
@@ -563,9 +615,7 @@ class Deck(Gtk.Window):
 
     def _refit(self):
         """Screen layout changed - re-hug the bottom of the primary monitor."""
-        display = Gdk.Display.get_default()
-        monitor = display.get_primary_monitor() or display.get_monitor(0)
-        geo = monitor.get_geometry()
+        geo = primary_geometry()
         self.win_w = geo.width
         self.ground_y = self.win_h - GROUND_MARGIN
         self.resize(self.win_w, self.win_h)
@@ -1187,7 +1237,11 @@ class Deck(Gtk.Window):
             item.connect("activate", fn)
             m.append(item)
         m.show_all()
-        m.popup_at_pointer(ev)
+        # popup_at_pointer is 3.22+; the deprecated popup() is what older GTK3 has.
+        if hasattr(m, "popup_at_pointer"):
+            m.popup_at_pointer(ev)
+        else:  # pragma: no cover - GTK < 3.22
+            m.popup(None, None, None, None, ev.button, ev.time)
 
 
 def start_log():
@@ -1203,6 +1257,36 @@ def start_log():
               flush=True)
     except OSError:
         pass
+
+
+def install_quit_signals():
+    """Quit cleanly on INT/TERM/HUP, on whichever binding this machine has.
+
+    GLib's own handlers, not signal.signal(): Python defers its handlers until it
+    regains control from Gtk.main(), which in practice never delivers them here -
+    so the plain-signal route is the last resort, not the first choice.
+
+    The three-argument form is what every version documents, but signal_add_full
+    is the C function with the user_data/destroy pair still on it, and some
+    bindings expose that arity, so a TypeError here means "right function, wrong
+    shape" and is worth one retry rather than a dead daemon.
+    """
+    quit_cb = lambda *_: (Gtk.main_quit(), False)[1]  # noqa: E731
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        for attempt in (
+            lambda s: unix_signal_add(GLib.PRIORITY_HIGH, s, quit_cb),
+            lambda s: unix_signal_add(GLib.PRIORITY_HIGH, s, quit_cb, None),
+            lambda s: GLib.unix_signal_add(GLib.PRIORITY_HIGH, s, quit_cb),
+        ):
+            try:
+                attempt(sig)
+                break
+            except (TypeError, AttributeError):
+                continue
+        else:
+            signal.signal(sig, lambda *_: Gtk.main_quit())
+            print(f"warn: GLib signal handler unavailable, using signal.signal for {sig}",
+                  flush=True)
 
 
 def single_instance():
@@ -1241,10 +1325,7 @@ def main():
     if not args.no_log and not args.demo:
         start_log()
 
-    # GLib's own handlers, not signal.signal(): Python defers its handlers until it
-    # regains control from Gtk.main(), which in practice never delivers them here.
-    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        unix_signal_add(GLib.PRIORITY_HIGH, sig, lambda *_: (Gtk.main_quit(), False)[1])
+    install_quit_signals()
     Deck(args)
     Gtk.main()
     PIDFILE.unlink(missing_ok=True)
