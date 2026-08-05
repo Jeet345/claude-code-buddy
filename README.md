@@ -301,10 +301,11 @@ row: the running totals only count from where reading started, so they under-rep
 `python3 dump_transcript.py` prints what is actually in your transcripts, which is the
 first thing to run if these numbers ever look wrong.
 
-**Quit means quit.** Because `--ensure` runs on every prompt, Quit leaves a marker at
-`~/.deck-guy/off` that the hooks respect, or it would undo itself within a minute. Running
-`./notify.sh --ensure idle` by hand clears the marker and starts him — a person typing that
-is asking for him back, and a hook never is.
+**Quit means quit for the sitting.** Because `--ensure` runs on every prompt, Quit leaves a
+marker at `~/.deck-guy/off` that the hooks respect, or it would undo itself within a minute.
+Two things clear it: running `./notify.sh --ensure idle` by hand, and opening Claude Code
+again. Both are you asking for him back; a mid-session hook never is. `/clear` and an
+auto-compact fire `SessionStart` too, but they are the same sitting and leave him quit.
 
 ### Is it actually wired?
 
@@ -334,6 +335,7 @@ which is a shell builtin.
 ~/.deck-guy/sessions/<session_id>.json   one file per running Claude Code session
 ~/.deck-guy/steps/<session_id>.*         turn timestamps
 ~/.deck-guy/off                          you chose Quit; hooks will not restart him
+                                         until the next Claude Code launch
 ~/.deck-guy/events.log                   only while check_hooks.py --trace is on
 ```
 

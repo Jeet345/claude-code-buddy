@@ -1190,12 +1190,14 @@ class Deck(Gtk.Window):
         print(f"desktop toasts {'on' if self.alerts.toast else 'off'}", flush=True)
 
     def on_quit(self, _item):
-        """Quit, and stay quit.
+        """Quit, and stay quit for this sitting.
 
         `notify.sh --ensure` now runs on every prompt so a daemon that died
         comes back by itself, which would otherwise make this menu item mean
-        "go away for thirty seconds". The marker says a person asked; running
-        `./notify.sh --ensure idle` by hand removes it again.
+        "go away for thirty seconds". The marker says a person asked. Running
+        `./notify.sh --ensure idle` by hand removes it, and so does opening
+        Claude Code again - a fresh launch is a person asking too, where a
+        prompt in the session you quit from is not.
         """
         try:
             SESSIONS_ROOT.mkdir(parents=True, exist_ok=True)

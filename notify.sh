@@ -73,7 +73,7 @@ grab_bool() {
 
 KEYS=(session_id hook_event_name cwd transcript_path tool_name
       permission_mode file_path command pattern url description
-      notification_type message error)
+      notification_type message error source)
 for key in "${KEYS[@]}"; do grab "$key"; done
 grab_bool is_interrupt
 
@@ -222,9 +222,18 @@ fi
 # leaves a marker, and a hook-driven ensure respects it. Running this script by
 # hand clears it, because that is a person explicitly asking for him back, and
 # a hook always carries a session_id while a person typing does not.
+#
+# Opening Claude Code again clears it too. Quit means "not for the rest of this
+# session", not "never again until you find the CLI incantation" - launching the
+# tool afresh is as clear a request as typing the command. SessionStart also
+# fires on /clear and on an auto-compact, which are the *same* sitting and must
+# not revive him; only startup and resume are a new one.
 if [ "$ensure" = 1 ] && { [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; }; then
     if [ -z "$g_session_id" ]; then
         rm -f "$ROOT/off" 2>/dev/null      # started by hand: he is wanted again
+    elif [ "$g_hook_event_name" = SessionStart ] &&
+         { [ "$g_source" = startup ] || [ "$g_source" = resume ]; }; then
+        rm -f "$ROOT/off" 2>/dev/null      # new sitting: quit does not carry over
     fi
     alive=0
     [ -e "$ROOT/off" ] && alive=1          # quit on purpose; leave him quit
