@@ -42,6 +42,7 @@ import cairo  # noqa: E402
 from sprites import COSTUMES, TOOL_COSTUME  # noqa: E402
 
 import prices  # noqa: E402
+import windows  # noqa: E402
 from alerts import Alerts  # noqa: E402
 from bubble import HIGH, WARN, Bubble, Meter, Panel, bar_colour, place  # noqa: E402
 from sessions import ROOT as SESSIONS_ROOT, SessionStore, clock  # noqa: E402
@@ -584,6 +585,15 @@ class Deck(Gtk.Window):
         # Turning the bubble off leaves the hover panel working, so the
         # information is still one hover away rather than gone.
         self.show_bubble = bool(prefs.get("bubble", True))
+        # Phase 4. Clicking him jumps to the terminal that session is running in.
+        # On by default because the click already had no other job - it waved -
+        # and because the alert badge exists to make you go there. It is a
+        # preference and not a constant because a click that moves your focus is
+        # exactly the kind of helpfulness some people want turned off.
+        self.click_focus = bool(prefs.get("click_focus", True))
+        # A short-lived line that outranks the bubble's usual contents. Only ever
+        # set in answer to a deliberate gesture, so it is allowed to interrupt.
+        self._say = ("", 0.0)
         # Sound ships off. It is the fastest way to turn a charming thing into
         # an annoying one, and unlike the badge you cannot ignore it.
         # No default thresholds repeated here. They were, and changing the ones
@@ -646,7 +656,8 @@ class Deck(Gtk.Window):
         try:
             prefs = self._load_prefs()
             prefs.update({"bubble": self.show_bubble,
-                          "toast": self.alerts.toast, "sound": self.alerts.sound})
+                          "toast": self.alerts.toast, "sound": self.alerts.sound,
+                          "click_focus": self.click_focus})
             PREFS.write_text(json.dumps(prefs, indent=2))
         except OSError:
             pass
@@ -731,9 +742,17 @@ class Deck(Gtk.Window):
         """
         s = self.store.newest() if self.store else None
         alert = self.alerts.current()
+        say, say_until = self._say
         if not self.show_bubble:
             self.bubble.set("")
             self._bubble_until = 0.0
+        elif say and now < say_until:
+            # Above the alert, below the preference. You just clicked, and what
+            # your click did outranks a message you have already read - but an
+            # alert is more urgent than this and is *still* suppressed when the
+            # bubble is off, so nothing here gets to overrule that switch.
+            self.bubble.set(say)
+            self._bubble_until = say_until
         elif alert:
             # An alert holds the bubble open for as long as it lasts. This is
             # the one thing here that is not allowed to fade out politely: the
@@ -1130,6 +1149,48 @@ class Deck(Gtk.Window):
         return False
 
     # -------------------------------------------------------------- interaction
+    def say(self, text, secs=3.0):
+        """Put one line in the bubble now, whatever else it was showing."""
+        self._say = (text, time.time() + secs)
+
+    def focus_terminal(self, session=None):
+        """Jump to the terminal this session is running in.
+
+        Returns the `windows.Result` so the menu item and the click can share
+        one implementation and still report differently.
+
+        When it cannot be done the cwd goes to the clipboard instead and he says
+        so. That is the honest degradation the phase asks for: on a native
+        Wayland terminal no client can raise another's window, and pretending
+        otherwise gives you a gesture that works four times and silently does
+        nothing the fifth, which is worse than one that never worked.
+        """
+        s = session or (self.store.newest() if self.store else None)
+        if s is None:
+            self.say("no session to jump to")
+            return windows.Result(False, "no session")
+
+        r = windows.focus(s.pids, project=s.project)
+        if r.ok:
+            print(f"focused terminal {r.xid:#x} {r.name!r} "
+                  f"for {s.id[:8]} via pids {s.pids}", flush=True)
+            return r
+
+        # Could not raise it. Hand over the one thing that is still useful.
+        copied = False
+        if s.cwd:
+            try:
+                clip = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+                clip.set_text(s.cwd, -1)
+                clip.store()
+                copied = True
+            except Exception as exc:      # no clipboard owner, no display
+                print(f"clipboard failed: {exc}", flush=True)
+        self.say("cwd copied - " + r.reason if copied else r.reason, 4.0)
+        print(f"focus failed for {s.id[:8]}: {r.reason} "
+              f"(pids {s.pids}, cwd copied: {copied})", flush=True)
+        return r
+
     def on_press(self, _w, ev):
         if ev.button == 1:
             self._drag = (ev.x_root, self.creature.x)
@@ -1163,15 +1224,17 @@ class Deck(Gtk.Window):
             dragged, self._drag = self._dragged, None
             if dragged:
                 self._save_home()
-            elif self.alerts.ack():
-                # A click already meant "I am here", so acknowledging is not a
-                # new gesture - the badge just gets to the click first. He still
-                # waves, because a click that does nothing visible feels broken.
-                print("alert acknowledged", flush=True)
-                self.creature.leave_error()
-                self.creature.cue("wave")
             else:
-                self.creature.cue("wave")   # a click, not a drag
+                # Order matters. Jumping happens first because it is the reason
+                # you clicked; acknowledging is a side effect of having arrived,
+                # not a competing gesture. Both then wave, because a click with
+                # nothing visible behind it feels broken.
+                if self.click_focus:
+                    self.focus_terminal()
+                if self.alerts.ack():
+                    print("alert acknowledged", flush=True)
+                    self.creature.leave_error()
+                self.creature.cue("wave")
         return True
 
     def on_toggle_bubble(self, item):
@@ -1183,6 +1246,11 @@ class Deck(Gtk.Window):
         self.alerts.sound = item.get_active()
         self._save_prefs()
         print(f"alert sound {'on' if self.alerts.sound else 'off'}", flush=True)
+
+    def on_toggle_click_focus(self, item):
+        self.click_focus = item.get_active()
+        self._save_prefs()
+        print(f"click jumps to terminal: {self.click_focus}", flush=True)
 
     def on_toggle_toast(self, item):
         self.alerts.toast = item.get_active()
@@ -1221,9 +1289,16 @@ class Deck(Gtk.Window):
         sound.set_active(self.alerts.sound)
         sound.connect("toggled", self.on_toggle_sound)
         m.append(sound)
+        jump = Gtk.CheckMenuItem(label="Click jumps to terminal")
+        jump.set_active(self.click_focus)
+        jump.connect("toggled", self.on_toggle_click_focus)
+        m.append(jump)
         m.append(Gtk.SeparatorMenuItem())
 
         items = [
+            # Here as well as on the click, so the gesture is discoverable and
+            # still reachable when the click has been turned off.
+            ("Focus terminal", lambda *_: self.focus_terminal()),
             ("Wave", lambda *_: self.creature.cue("wave")),
             ("Jump!", lambda *_: self.creature.set_mode("jump", 45)),
             ("Nap now", lambda *_: self.creature.set_mode("sleep")),

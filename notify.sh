@@ -107,6 +107,34 @@ fi
 sid="${g_session_id//[^A-Za-z0-9._-]/}"
 [ -z "$sid" ] && sid="default"
 
+# ------------------------------------------------------------------ pid chain
+# Which window is this session's terminal? Nothing in the payload says, and the
+# only process that knows is this one: we are a child of the shell that Claude
+# Code spawned, so walking up lands on `claude`, then its shell, then whatever
+# owns a window. The daemon matches these against `_NET_WM_PID`, nearest first.
+#
+# Nearest first is the whole point of recording the chain rather than one pid.
+# `claude`'s parent shell owns no window and its grandparent might; the last
+# entry is always something like systemd, which owns everything and would
+# "focus your terminal" by raising a stranger.
+#
+# Zero forks: `read < /proc/N/stat` is a builtin redirect and the parsing is all
+# parameter expansion. Recomputed every event rather than cached because a
+# resumed session can come back in a different terminal, and ten opens is
+# cheaper than being wrong about where you are looking.
+pids=""
+p=$PPID
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ "${p:-0}" -gt 1 ] 2>/dev/null || break
+    pids="$pids${pids:+,}$p"
+    read -r st < "/proc/$p/stat" 2>/dev/null || break
+    # comm is parenthesised and can contain spaces and brackets of its own, so
+    # cut after the *last* ')' - never split the line on whitespace from the left.
+    st="${st##*\) }"          # "S 36079 36079 ..."
+    st="${st#* }"             # "36079 36079 ..."
+    p="${st%% *}"             # "36079"
+done
+
 # ------------------------------------------------------------------- the event
 # hook_event_name is authoritative when present; MODE is the fallback for a CLI
 # that does not send it, and for hand-driven testing from a terminal.
@@ -192,11 +220,11 @@ tmp="$SESS/$sid.json.$$"
 [ "$write_session" = 1 ] &&
 printf '{"session_id":"%s","state":"%s","event":"%s","tool":"%s","cwd":"%s",
 "transcript_path":"%s","permission_mode":"%s","ts":%s,"prompt_ts":%s,
-"session_started":%s,"heartbeat":%s,"alert":"%s","alert_msg":"%s",
+"session_started":%s,"heartbeat":%s,"alert":"%s","alert_msg":"%s","pids":"%s",
 "input":{"file_path":"%s","command":"%s","pattern":"%s","url":"%s","description":"%s"}}\n' \
     "$sid" "$mode" "$g_hook_event_name" "$g_tool_name" "$g_cwd" \
     "$g_transcript_path" "$g_permission_mode" "$now" "$prompt_ts" \
-    "$started" "$now" "$g_notification_type" "$g_message" \
+    "$started" "$now" "$g_notification_type" "$g_message" "$pids" \
     "$g_file_path" "$g_command" "$g_pattern" "$g_url" "$g_description" \
     > "$tmp" 2>/dev/null && mv -f "$tmp" "$SESS/$sid.json" 2>/dev/null
 

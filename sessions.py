@@ -142,10 +142,17 @@ class Session:
         # which is exactly what makes an answered prompt stop shouting.
         self.alert = _text(d.get("alert"))
         self.alert_msg = _text(d.get("alert_msg"))
+        # Phase 4. The hook's own ancestry, nearest first, as recorded by
+        # notify.sh: the only trace of which window this session is sitting in.
+        # Kept as ints and silently dropped if malformed - this feeds a window
+        # lookup, not an assertion, and a bad entry simply matches nothing.
+        self.pids = _pids(d.get("pids"))
 
     # The hook rewrites the whole file each event, and not every event carries
     # every field, so keep the last non-empty value we were told.
     def inherit(self, old):
+        if not self.pids and getattr(old, "pids", None):
+            self.pids = old.pids
         for field in ("cwd", "transcript_path", "permission_mode"):
             if not getattr(self, field) and getattr(old, field, ""):
                 setattr(self, field, getattr(old, field))
@@ -235,6 +242,25 @@ def _text(v):
     `Path(cwd)`. Missing is handled everywhere; wrong-typed was not.
     """
     return v if isinstance(v, str) else ""
+
+
+def _pids(v):
+    """`"36927,36079,9403"` -> `[36927, 36079, 9403]`, order preserved.
+
+    Order is the meaning here - nearest ancestor first - so this sorts nothing
+    and de-duplicates nothing. Anything unparseable is dropped rather than
+    raised, on the same principle as `_text`: a malformed entry costs us one
+    candidate window, and there is no reading of a broken pid worth a traceback
+    on the draw tick.
+    """
+    out = []
+    for part in (_text(v) or "").split(","):
+        part = part.strip()
+        if part.isdigit():
+            n = int(part)
+            if n > 1:
+                out.append(n)
+    return out
 
 
 # ---------------------------------------------------------------------- store

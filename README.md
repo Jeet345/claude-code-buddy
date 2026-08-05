@@ -37,6 +37,7 @@ any art change.
 | **`python3-gi-cairo`** | the GI↔cairo bridge | `python3-gi-cairo` |
 | Pillow | bakes the sprite atlas | `python3-pil` |
 | X11, or Wayland with XWayland | positioning and click-through | `xwayland` |
+| *(optional)* libwnck **or** `xprop` | jumping to a session's terminal | `gir1.2-wnck-3.0`, or `x11-utils` |
 
 Any GTK 3.x and any PyGObject: the four APIs that moved between versions (the unix signal
 handler, monitor geometry, monitor hotplug, and the context menu popup) are probed at
@@ -179,19 +180,52 @@ GTK's linking. `notify.sh` always strips them.
 | `--no-shape` | skip click-through, for debugging where the window actually is |
 
 Drag him with the mouse to move him; his home position persists in `pos.json`. Click him and
-he waves. Hover him for the readout panel. **Right-click him for the menu**, which has:
+he **jumps you to that session's terminal** and waves. Hover him for the readout panel.
+**Right-click him for the menu**, which has:
 
 | Item | Does |
 |---|---|
 | **Speech bubble** | turns the bubble above his head on and off — remembered in `prefs.json` |
 | **Desktop notifications** | `notify-send` toasts for alerts. On by default, remembered |
 | **Alert sound** | a beep. **Off** by default, remembered. Independent of the toast |
+| **Click jumps to terminal** | what a left-click does. On by default, remembered |
+| Focus terminal | do it now, without clicking — still there when the click is turned off |
 | Wave / Jump! / Nap now | play a state on demand |
 | Costume: … | force a costume, for checking the art |
 | Quit | stop the daemon, **and keep him stopped** |
 
 Turning the bubble off leaves the hover panel working, so the same information is one hover
 away rather than gone.
+
+### Jumping to the terminal
+
+The badge tells you a session is waiting on you. Clicking him takes you there — the window
+that session is running in comes to the front.
+
+Nothing in a hook payload says which window that is, so `notify.sh` records its own place
+in the process tree instead, and the daemon matches that against the pids the window
+manager reports:
+
+```
+hook → zsh → claude → zsh → code → code → systemd
+                                   ^^^^
+                                   owns the window
+```
+
+Nearest ancestor wins, so you land on the terminal rather than on its grandparent. If one
+process owns several windows — an editor with two projects open — the one whose title names
+the session's project wins, then whichever you used most recently.
+
+**X11 and XWayland only.** A terminal running as a native Wayland client cannot be raised by
+another client, by anyone, ever. When the jump is impossible he **copies the session's `cwd`
+to the clipboard and says so in the bubble**, rather than doing nothing and letting you
+think the click missed.
+
+Window lookup uses `libwnck` if its typelib is installed and falls back to forking `xprop`
+if not; neither is required at install time and the failure is reported, not hidden.
+
+Turn the click off from the menu if you would rather he never moved your focus — **Focus
+terminal** stays in the menu either way.
 
 **The toast and the sound are two switches because they are two situations**, and all four
 combinations do something:
@@ -415,10 +449,12 @@ bubble.py        the speech bubble, hover panel and context meter
 transcript.py    tails the transcript JSONL for tokens, context and cost
 prices.py        the price table and context windows  <- this one rots, check it
 alerts.py        who is waiting on you, escalation, toasts and sound
+windows.py       pid chain -> X window -> raise it, and an honest "cannot"
 dump_transcript.py  what is really in a transcript today; run it when numbers look wrong
 test_sessions.py python3 test_sessions.py    (no display needed)
 test_transcript.py  python3 test_transcript.py  (no display needed)
 test_alerts.py   python3 test_alerts.py      (no display needed)
+test_windows.py  python3 test_windows.py     (live checks skipped without a display)
 test_interactions.py  clicking him at the worst possible moment  (needs a display)
 check_hooks.py   are the hooks wired, real, and actually firing
 notify.sh        the hook target; writes a session file, starts the daemon

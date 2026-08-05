@@ -1,8 +1,10 @@
 # Deck Guy — from desktop pet to live HUD
 
-**Status:** **v1 is built and running** — phases 1, 2 and 3. Phases 4-7 are still planning
-only. The pet itself (PLAN.md phases 0-4) is done.
-**Written:** 2026-07-29 · **phase 1:** 2026-07-30 · **phases 2 and 3:** 2026-08-01
+**Status:** **v1 is built and running** — phases 1, 2 and 3, plus the terminal-focusing half
+of phase 4. The rest of 4 and phases 5-7 are still planning only. The pet itself (PLAN.md
+phases 0-4) is done.
+**Written:** 2026-07-29 · **phase 1:** 2026-07-30 · **phases 2 and 3:** 2026-08-01 ·
+**phase 4 focus-terminal:** 2026-08-05
 
 The idea: he stops being a pet that reacts to Claude Code and becomes a **window into**
 Claude Code — always visible, always current, and eventually a place you can act from
@@ -141,10 +143,10 @@ alert being orthogonal to the state rather than being one.
 - Per-avatar badge: blocked on permission, finished, crashed, running.
 - Background task and subagent list with progress, from `Task` tool calls and
   `SubagentStop`.
-- **Click a session to focus its terminal.** Doable on X11/XWayland via the window's
-  `_NET_WM_PID` and `wmctrl`/`xdotool`. Native Wayland terminal windows cannot be focused
-  this way — accept the limitation and degrade to "copy the session's cwd" rather than
-  fake it.
+- ~~**Click a session to focus its terminal.**~~ **Built** (`windows.py`). X11/XWayland via
+  `_NET_WM_PID`, matched against the process chain `notify.sh` now records. No
+  `wmctrl`/`xdotool` after all — `Gdk.Window.focus(0)` raises a foreign window directly.
+  Native Wayland terminals degrade to copying the session's `cwd`, as planned.
 
 ### Phase 5 — Control *(the first phase that can fail)*
 

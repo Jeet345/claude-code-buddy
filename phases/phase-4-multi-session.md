@@ -1,6 +1,9 @@
 # Phase 4 — Many sessions, one buddy
 
-**Status:** not started
+**Status:** partly built — tasks 1 and 5 are done (**click him to focus that session's
+terminal**, in `windows.py`). The avatar row, the layout module and the priority rule are
+not started, so today the gesture applies to the buddy himself, who mirrors the newest
+session as he always has.
 **Depends on:** phases 1 and 3 (session model; badges)
 **Delivers:** one place to see every terminal and worktree at once
 **Data needed:** already flowing. This phase is drawing and window management.
@@ -66,11 +69,17 @@ tooltip says so. Degrading honestly beats a button that silently does nothing.
 
 ## Tasks
 
-1. Record terminal pid in the session file.
+1. ~~Record terminal pid in the session file.~~ **Done** — `notify.sh` records the whole
+   ancestor chain, not one pid, so the daemon can pick the nearest one that owns a window.
 2. `layout.py`: avatar row, spacing, screen-edge clamping, overflow ("+3 more").
 3. Half-scale avatar drawing; hover bubble per avatar.
 4. Priority rule for the main buddy's posture; unit tests.
-5. `windows.py`: pid → window, activate, honest failure.
+5. ~~`windows.py`: pid → window, activate, honest failure.~~ **Done** — `test_windows.py`.
+   Two things the spec guessed wrong: `wmctrl`/`xdotool` are not needed (`Gdk.Window.focus`
+   raises a foreign window directly), and `Gdk.property_get` cannot be called from
+   PyGObject at all, so reading `_NET_WM_PID` needs libwnck or a fork of `xprop`. Also
+   unplanned and necessary: one pid can own several windows, so the title naming the
+   session's project breaks the tie.
 6. Subagent/background-task row under the parent session.
 7. Input shape must now cover buddy + avatars; verify click-through everywhere else.
 
