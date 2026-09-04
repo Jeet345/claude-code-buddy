@@ -32,8 +32,9 @@ import gi
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import Gdk, GdkPixbuf, GLib, GObject, Gtk  # noqa: E402
+from gi.repository import Gdk, GLib, GObject, Gtk  # noqa: E402
+
+import vector  # noqa: E402
 
 import cairo  # noqa: E402
 
@@ -82,13 +83,19 @@ PIDFILE = HERE / "daemon.pid"
 LOGFILE = HERE / "guy.log"
 LOG_MAX = 256 * 1024
 
-TICK_HZ = 30          # motion updates per second; sprite frames advance at their own fps
-SLEEP_HZ = 5          # throttled tick rate once he is asleep
-MODE_HZ = {           # per-posture tick rate; anything absent runs at TICK_HZ
-    "idle": 8,        # idle is 4fps, blink 8fps - nothing moves across the screen
-    "working": 12,    # costume props top out at 8fps
+TICK_HZ = 60          # motion updates per second
+SLEEP_HZ = 10         # throttled tick rate once he is asleep
+# Per-posture tick rate; anything absent runs at TICK_HZ.
+#
+# The body is drawn from springs now rather than stepped through baked frames,
+# so there is no longer an animation fps to merely outrun - motion is continuous
+# and 60Hz is what makes it look it. What has not changed is that a creature who
+# is only breathing does not need 60Hz to do it, so the quiet postures stay
+# throttled. That is the same reasoning the sprite version used, applied to a
+# different set of numbers.
+MODE_HZ = {
+    "idle": 30,       # breathing and the occasional blink
     "sleep": SLEEP_HZ,
-    "error": 12,      # nothing moves, but the badge on his shoulder pulses
 }
 PATROL_RANGE = 150    # px he will wander either side of home
 PATROL_SPEED = 45     # px per second
@@ -103,54 +110,6 @@ BUBBLE_FADE = 0.6     # secs it takes to fade out after that
 
 
 
-class Sprites:
-    """Atlas frames, pre-scaled nearest-neighbour so the pixels stay hard.
-
-    Both facings are baked at load time: flipping a pixbuf per frame would be
-    pointless work every tick, and there are only a few dozen frames.
-    """
-
-    def __init__(self, scale):
-        manifest = json.loads((HERE / "sprites.json").read_text())
-        atlas = GdkPixbuf.Pixbuf.new_from_file(str(HERE / "sprites.png"))
-        self.scale = scale
-        self.grid_w, self.grid_h = manifest["grid"]
-
-        def cut(rects):
-            out = []
-            for x, y, w, h in rects:
-                sub = atlas.new_subpixbuf(x, y, w, h).scale_simple(
-                    w * scale, h * scale, GdkPixbuf.InterpType.NEAREST
-                )
-                out.append((sub, sub.flip(True), w, h))
-            return out
-
-        self.anims = {
-            name: {
-                "frames": cut(spec["rects"]),
-                "fps": spec["fps"],
-                "loop": spec["loop"],
-                "attach": spec.get("attach", {}),
-            }
-            for name, spec in manifest["anims"].items()
-        }
-        self.props = {
-            name: {"frames": cut(spec["rects"]), "z": spec["z"]}
-            for name, spec in manifest["props"].items()
-        }
-        first = self.anims["idle"]["frames"][0][0]
-        self.w, self.h = first.get_width(), first.get_height()
-
-    def __getitem__(self, name):
-        return self.anims[name]
-
-    def has(self, name):
-        return name in self.anims
-
-    def prop_frame(self, name, index, facing):
-        frames = self.props[name]["frames"]
-        pix, flipped, cw, ch = frames[index % len(frames)]
-        return (flipped if facing < 0 else pix), cw, ch
 
 
 class Creature:
@@ -375,11 +334,11 @@ class Creature:
         while self._frame_t >= step:
             self._frame_t -= step
             self.frame += 1
-            if self.frame >= len(spec["frames"]):
+            if self.frame >= spec["count"]:
                 if spec["loop"]:
                     self.frame = 0
                 else:
-                    self.frame = len(spec["frames"]) - 1
+                    self.frame = spec["count"] - 1
                     done = True
         return done
 
@@ -462,31 +421,45 @@ class Creature:
                     self._jump_phase = "air"
 
     # ------------------------------------------------------------------ frames
+
     @property
-    def pixbuf(self):
-        frames = self.sp[self.anim]["frames"]
-        pix, flipped, _, _ = frames[min(self.frame, len(frames) - 1)]
-        return flipped if self.facing < 0 else pix
+    def frame_phase(self):
+        """Where we are in the animation loop, in frames, with the fraction.
 
-    def attachments(self):
-        """(pixbuf, cell_x, cell_y, z) for every prop pinned to the current frame.
-
-        Anchors are authored facing right, so facing left mirrors them across the
-        body grid - otherwise the pan would hang off the wrong side of him.
+        `frame` on its own is a flipbook index, which is all a sprite needed.
+        Props are interpolated between their keyframes now, so they also need
+        how far through the current frame we are.
         """
         spec = self.sp[self.anim]
+        return self.frame + min(1.0, self._frame_t * spec["fps"])
+
+    def attachment_specs(self):
+        """(prop_key, cell_x, cell_y, z, rotation) for the vector renderer.
+
+        The anchors in COSTUMES are keyframes, not stops: they are sampled
+        along a spline at the continuous phase so a prop travels between them
+        instead of teleporting, and each prop leans into its own motion.
+        """
+        spec = self.sp[self.anim]
+        phase = self.frame_phase
         out = []
         for name, info in spec["attach"].items():
             anchors = info["anchors"]
-            anchor = anchors[min(self.frame, len(anchors) - 1)]
-            if not anchor:
+            pos = vector.sample_anchors(anchors, phase)
+            if pos is None:
                 continue
-            pix, cw, _ = self.sp.prop_frame(name, self.frame, self.facing)
-            ax, ay = anchor
+            key = vector.prop_key(name, self.frame)
+            if key is None:
+                continue
+            size = vector.prop_size(key)
+            ax, ay = pos
+            rot = vector.prop_rotation(name, anchors, phase)
             if self.facing < 0:
-                ax = self.sp.grid_w - ax - cw
-            out.append((pix, ax, ay, info["z"]))
+                ax = self.sp.grid_w - ax - (size[0] if size else 0)
+                rot = -rot
+            out.append((key, ax, ay, info["z"], rot))
         return out
+
 
 
 def primary_geometry():
@@ -519,7 +492,7 @@ class Deck(Gtk.Window):
     def __init__(self, args):
         super().__init__(type=Gtk.WindowType.TOPLEVEL)
         self.args = args
-        self.sp = Sprites(args.scale)
+        self.sp = vector.Sheet(args.scale)
 
         geo = primary_geometry()
         self.win_w, self.win_h = geo.width, args.height
@@ -527,6 +500,7 @@ class Deck(Gtk.Window):
 
         home = self._load_home(geo.width // 2)
         self.creature = Creature(self.sp, home, args.idle_secs, on_stale=self.on_stale)
+        self.rig = vector.Rig()
         self._fence()
 
         self.set_app_paintable(True)
@@ -840,45 +814,7 @@ class Deck(Gtk.Window):
             return 0            # never alarm on a number we are guessing at
         return 2 if m.fill >= HIGH else 1 if m.fill >= WARN else 0
 
-    _inset_cache = {}
 
-    @classmethod
-    def _body_inset(cls, pixbuf):
-        """`(top, left, right)` transparent margin of a body frame, in px.
-
-        Cached per frame identity: the scan is 11k pixels and only runs when a
-        badge is showing, but the answer never changes for a given frame.
-        """
-        key = id(pixbuf)
-        hit = cls._inset_cache.get(key)
-        if hit is not None:
-            return hit
-        try:
-            data = pixbuf.get_pixels()
-            n, stride = pixbuf.get_n_channels(), pixbuf.get_rowstride()
-            w, h = pixbuf.get_width(), pixbuf.get_height()
-            if n < 4:
-                return (0, 0, 0)                   # no alpha, so no margin
-            top, left, right = h, w, w
-            for row in range(h):
-                base = row * stride
-                for col in range(w):
-                    if data[base + col * n + 3]:
-                        top = min(top, row)
-                        left = min(left, col)
-                        break
-                else:
-                    continue
-                for col in range(w - 1, -1, -1):   # rightmost opaque in this row
-                    if data[base + col * n + 3]:
-                        right = min(right, w - 1 - col)
-                        break
-            result = (0 if top >= h else top,
-                      0 if left >= w else left, 0 if right >= w else right)
-        except Exception:                          # a pixbuf shape we do not know
-            result = (0, 0, 0)
-        cls._inset_cache[key] = result
-        return result
 
     def draw_context_pip(self, cr, c):
         """A small badge at his shoulder. Deliberately not a costume: a costume
@@ -892,7 +828,7 @@ class Deck(Gtk.Window):
         # head in empty sky, looking like an unrelated notification - the same
         # mistake the bubble made in phase 1. Find the actual pixels instead.
         bx, by, bw, _ = c.bbox(self.ground_y)
-        pad_top, _, pad_right = self._body_inset(c.pixbuf)
+        pad_top, _, pad_right = vector.body_inset(self.sp.scale)
         x = int(bx + bw - pad_right - px * 2)
         y = int(by + pad_top)
         cr.set_source_rgb(0.16, 0.11, 0.09)
@@ -912,15 +848,17 @@ class Deck(Gtk.Window):
         a = self.alerts.current()
         if a is None:
             return
-        pix, _, _ = self.sp.prop_frame("alert", a.frame, 1)
+        key = vector.prop_key("alert", a.frame)
+        aw, ah = vector.prop_size(key)
+        s = self.sp.scale
         bx, by, _, _ = c.bbox(self.ground_y)
-        pad_top, pad_left, _ = self._body_inset(c.pixbuf)
-        x = int(bx + pad_left - pix.get_width() * 0.45)
-        y = int(by + pad_top - pix.get_height() * 0.3)
+        pad_top, pad_left, _ = vector.body_inset(self.sp.scale)
+        x = int(bx + pad_left - aw * s * 0.45)
+        y = int(by + pad_top - ah * s * 0.3)
         # A slow pulse while it is unanswered. Not a flash: this can sit there
         # for twenty minutes, and anything faster than this is unliveable.
         alpha = 0.72 + 0.28 * (0.5 + 0.5 * math.sin(now * 2.4))
-        self._blit(cr, pix, x, y, alpha=alpha)
+        vector.draw_prop(cr, key, x, y, s, alpha=alpha)
 
     def demo_metric_rows(self, now):
         """--demo has no transcript, so fake a bar that sweeps the thresholds.
@@ -1012,6 +950,7 @@ class Deck(Gtk.Window):
         if self.args.demo:
             self.run_demo(now)
         self.creature.update(dt, now)
+        self.rig.update(dt, self.creature)
         # Escalation is a clock, not an event, so it has to be looked at every
         # tick. There is no new timer: this is the one that was already running.
         self.on_alerts(now)
@@ -1038,7 +977,13 @@ class Deck(Gtk.Window):
         readout = (self.bubble.text, self.bubble.timer, self.panel.key(),
                    round(self.readout_alpha(now), 2), self.context_level())
         rect = self.readout_rect(now)
-        key = (c.anim, c.frame, c.facing, bbox, phase, readout)
+        # The sprite body only changed when `frame` did, so the frame index was
+        # a sound repaint key. A spring-driven body changes every tick, so the
+        # tick counter goes in instead - except while asleep, where the rig is
+        # effectively still and the old economy is worth keeping.
+        self._seq = getattr(self, "_seq", 0) + 1
+        moving = 0 if c.mode == "sleep" else self._seq
+        key = (c.anim, c.frame, c.facing, bbox, phase, readout, moving)
         if key != getattr(self, "_last_key", None):
             self._last_key = key
             pad = 90  # room for props, sparkles and the zzz trail
@@ -1077,14 +1022,6 @@ class Deck(Gtk.Window):
         win.input_shape_combine_region(region, 0, 0)
 
     # ------------------------------------------------------------------- draw
-    def _blit(self, cr, pix, x, y, alpha=1.0):
-        """Nearest-neighbour blit - cairo's default filter would soften the pixels."""
-        Gdk.cairo_set_source_pixbuf(cr, pix, x, y)
-        cr.get_source().set_filter(cairo.Filter.NEAREST)
-        if alpha >= 1.0:
-            cr.paint()
-        else:
-            cr.paint_with_alpha(alpha)
 
     def on_draw(self, _widget, cr):
         cr.set_operator(cairo.OPERATOR_SOURCE)
@@ -1100,28 +1037,32 @@ class Deck(Gtk.Window):
         # Ground shadow: tightens as he rises, which is what sells the jump height.
         if c.mode != "sleep":
             tier = 0 if c.y_off < 6 else (1 if c.y_off < 26 else 2)
-            shadow, sw, _ = self.sp.prop_frame("shadow", tier, 1)
-            self._blit(cr, shadow, int(c.x - shadow.get_width() / 2),
-                       self.ground_y - shadow.get_height())
+            key = vector.prop_key("shadow", tier)
+            sw, sh = vector.prop_size(key)
+            vector.draw_prop(cr, key, c.x - sw * s / 2,
+                             self.ground_y - sh * s, s)
 
-        for pix, ax, ay, z in c.attachments():
+        specs = c.attachment_specs()
+        for key, ax, ay, z, rot in specs:
             if z == "back":
-                self._blit(cr, pix, x + ax * s, y + ay * s)
-        self._blit(cr, c.pixbuf, x, y)
-        for pix, ax, ay, z in c.attachments():
+                vector.draw_prop(cr, key, x + ax * s, y + ay * s, s, rotate=rot)
+        self.rig.draw(cr, x, y, w, h, c.facing)
+        for key, ax, ay, z, rot in specs:
             if z != "back":
-                self._blit(cr, pix, x + ax * s, y + ay * s)
+                vector.draw_prop(cr, key, x + ax * s, y + ay * s, s, rotate=rot)
 
         if c.sparkle and c.y_off > 8:
-            spark, _, _ = self.sp.prop_frame("sparkle", int(now * 12), 1)
-            for dx, dy in ((-spark.get_width() - 6, 6), (w + 6, 18)):
-                self._blit(cr, spark, x + dx, y + dy)
+            key = vector.prop_key("sparkle", int(now * 12))
+            spw = vector.prop_size(key)[0] * s
+            for dx, dy in ((-spw - 6, 6), (w + 6, 18)):
+                vector.draw_prop(cr, key, x + dx, y + dy, s)
 
         if c.puff_until > now:
             t = 1.0 - (c.puff_until - now) / PUFF_SECS
-            puff, _, _ = self.sp.prop_frame("puff", int(t * 3), 1)
-            self._blit(cr, puff, x + w // 2 - puff.get_width() // 2,
-                       y - puff.get_height() // 2, alpha=1.0 - t)
+            key = vector.prop_key("puff", int(t * 3))
+            pw, ph = vector.prop_size(key)
+            vector.draw_prop(cr, key, x + w / 2 - pw * s / 2,
+                             y - ph * s / 2, s, alpha=1.0 - t)
 
         self.draw_context_pip(cr, c)
         self.draw_alert_badge(cr, c, now)
@@ -1136,7 +1077,6 @@ class Deck(Gtk.Window):
                              self.readout_alpha(now))
 
         if c.mode == "sleep":
-            z, _, _ = self.sp.prop_frame("zzz", 0, 1)
             phase = now % 3.0
             for i in range(3):
                 t = (phase - i * 0.9) / 2.4
@@ -1144,7 +1084,8 @@ class Deck(Gtk.Window):
                     cr.save()
                     cr.translate(x + w + 4 + t * 26, y + h * 0.2 - t * 46)
                     cr.scale(0.6 + t, 0.6 + t)
-                    self._blit(cr, z, 0, 0, alpha=max(0.0, 1.0 - t))
+                    vector.draw_prop(cr, "zzz", 0, 0, s,
+                                     alpha=max(0.0, 1.0 - t))
                     cr.restore()
         return False
 

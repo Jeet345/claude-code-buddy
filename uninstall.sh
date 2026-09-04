@@ -146,7 +146,8 @@ run rm -f "$D/daemon.pid" "$D/state.json" "$D/prompt_ts" "$D/guy.crash.log"
 # have finished with is untidy.
 if [ "$purge" = 1 ]; then
     run rm -f "$D/pos.json" "$D/prefs.json" "$D/guy.log" \
-              "$D/sprites.png" "$D/sprites.json"
+              "$D/sprites.png" "$D/sprites.json" \
+              "$D/vector_paths.py" "$D/vector_prop_paths.py"
     done_say "purged    position, prefs, log and baked art"
 else
     done_say "kept      pos.json, prefs.json, guy.log, sprites.* (--purge removes them)"

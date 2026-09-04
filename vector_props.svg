@@ -1,0 +1,150 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 50" width="120" height="50">
+  <!-- Props, redrawn as vector.
+
+       Every prop keeps the exact footprint of its ASCII grid in sprites.py,
+       because COSTUMES anchors it by top-left corner in that space. The
+       `box_<name>` rects below record those footprints; the renderer shifts
+       each prop so its box corner lands on the anchor, which is what the
+       pixbuf blit did.
+
+       Frames are separate props with a numeric suffix: alert0/alert1,
+       sparkle0/1, shadow0/1/2, puff0/1/2.
+
+       Laid out on one canvas purely so a single compile pass emits them all. -->
+
+  <!-- ============ glasses  24 x 6  @ (0,0) ============ -->
+  <path id="glasses__lens_l" fill="#4A4A4A"
+        d="M 0.6 0 L 8.4 0 C 9.0 0 9.0 0.6 9.0 1.2 L 9.0 4.8 C 9.0 5.4 9.0 6 8.4 6
+           L 0.6 6 C 0 6 0 5.4 0 4.8 L 0 1.2 C 0 0.6 0 0 0.6 0 Z
+           M 1.6 1.3 L 1.6 4.7 L 7.4 4.7 L 7.4 1.3 Z"/>
+  <path id="glasses__lens_r" fill="#4A4A4A"
+        d="M 13.6 0 L 21.4 0 C 22.0 0 22.0 0.6 22.0 1.2 L 22.0 4.8 C 22.0 5.4 22.0 6 21.4 6
+           L 13.6 6 C 13.0 6 13.0 5.4 13.0 4.8 L 13.0 1.2 C 13.0 0.6 13.0 0 13.6 0 Z
+           M 14.6 1.3 L 14.6 4.7 L 20.4 4.7 L 20.4 1.3 Z"/>
+  <rect id="glasses__bridge" x="8.6" y="2.1" width="4.8" height="1.4" rx="0.6" fill="#4A4A4A"/>
+  <rect id="glasses__temple" x="21.6" y="2.1" width="2.4" height="1.2" rx="0.6" fill="#4A4A4A"/>
+
+  <!-- ============ book  14 x 11  @ (28,0) ============ -->
+  <rect id="book__cover" x="28" y="0"   width="14" height="11" rx="1.4" fill="#3C6E9C"/>
+  <rect id="book__page"  x="29.8" y="1" width="10.4" height="9" rx="0.7" fill="#EDE8DC"/>
+  <rect id="book__l1" x="30.8" y="2.4" width="8.4" height="0.9" rx="0.45" fill="#3C6E9C"/>
+  <rect id="book__l2" x="30.8" y="4.2" width="7.0" height="0.9" rx="0.45" fill="#3C6E9C"/>
+  <rect id="book__l3" x="30.8" y="6.0" width="8.4" height="0.9" rx="0.45" fill="#3C6E9C"/>
+  <rect id="book__l4" x="30.8" y="7.8" width="6.2" height="0.9" rx="0.45" fill="#3C6E9C"/>
+
+  <!-- ============ pencil  6 x 10  @ (46,0) ============ -->
+  <rect id="pencil__body"    x="47" y="0"   width="4" height="5.2" rx="0.8" fill="#C9942F"/>
+  <rect id="pencil__ferrule" x="47" y="5.0" width="4" height="1.2" fill="#4A4A4A"/>
+  <rect id="pencil__wood"    x="47" y="6.0" width="4" height="2.2" fill="#C9942F"/>
+  <path id="pencil__tip" fill="#101010" d="M 47 8.1 L 51 8.1 L 49 10 Z"/>
+
+  <!-- ============ hardhat  16 x 7  @ (56,0) ============ -->
+  <path id="hardhat__dome" fill="#F2B441"
+        d="M 58.4 5.4 C 58.4 1.6 60.6 0 64 0 C 67.4 0 69.6 1.6 69.6 5.4 Z"/>
+  <rect id="hardhat__brim" x="56" y="4.9" width="16" height="2.1" rx="1.05" fill="#F2B441"/>
+  <rect id="hardhat__ridge" x="63.2" y="0.6" width="1.6" height="4.4" rx="0.8"
+        fill="#C9942F" fill-opacity="0.55"/>
+
+  <!-- ============ wrench  6 x 11  @ (76,0) ============ -->
+  <path id="wrench__head" fill="#4A4A4A"
+        d="M 76 0 L 78 0 L 78 1.9 L 80 1.9 L 80 0 L 82 0 L 82 3.6
+           C 82 4.4 81.4 4.9 80.6 4.9 L 77.4 4.9 C 76.6 4.9 76 4.4 76 3.6 Z"/>
+  <rect id="wrench__shaft" x="78" y="4.4" width="2" height="6.6" rx="1" fill="#4A4A4A"/>
+
+  <!-- ============ binoculars  16 x 9  @ (86,0) ============ -->
+  <rect id="binoculars__cup_l" x="86" y="0" width="5" height="4" rx="1.1" fill="#4A4A4A"/>
+  <rect id="binoculars__cup_r" x="97" y="0" width="5" height="4" rx="1.1" fill="#4A4A4A"/>
+  <rect id="binoculars__tube_l" x="86.8" y="3.6" width="3.4" height="5" rx="1.2" fill="#4A4A4A"/>
+  <rect id="binoculars__tube_r" x="97.8" y="3.6" width="3.4" height="5" rx="1.2" fill="#4A4A4A"/>
+  <rect id="binoculars__bridge" x="90.6" y="4.0" width="6.8" height="2" rx="0.8" fill="#4A4A4A"/>
+  <rect id="binoculars__gloss_l" x="87.4" y="0.7" width="1.2" height="2.4" rx="0.6"
+        fill="#6E6E6E"/>
+  <rect id="binoculars__gloss_r" x="98.4" y="0.7" width="1.2" height="2.4" rx="0.6"
+        fill="#6E6E6E"/>
+
+  <!-- ============ chefhat  14 x 9  @ (0,16) ============ -->
+  <circle id="chefhat__puff_l" cx="3.3"  cy="19.4" r="3.3" fill="#F0EDE4"/>
+  <circle id="chefhat__puff_r" cx="10.5" cy="19.4" r="3.3" fill="#F0EDE4"/>
+  <circle id="chefhat__puff_m" cx="6.9"  cy="19.2" r="3.2" fill="#F0EDE4"/>
+  <rect id="chefhat__band" x="2.0" y="21.0" width="9.8" height="4.0" rx="1.0" fill="#F0EDE4"/>
+  <rect id="chefhat__shade" x="2.0" y="23.4" width="9.8" height="1.6" rx="0.8"
+        fill="#D9D5C8"/>
+
+  <!-- ============ pan  16 x 6  @ (18,16) ============ -->
+  <path id="pan__bowl" fill="#4A4A4A"
+        d="M 18 18 L 30 18 L 28.4 21.2 C 28.1 21.8 27.6 22 27 22 L 21 22
+           C 20.4 22 19.9 21.8 19.6 21.2 Z"/>
+  <rect id="pan__rim" x="18" y="17.6" width="12" height="1.4" rx="0.7" fill="#6E6E6E"/>
+  <rect id="pan__handle" x="29.4" y="17.8" width="4.6" height="1.5" rx="0.75" fill="#4A4A4A"/>
+
+  <!-- ============ food  8 x 5  @ (38,16) ============ -->
+  <ellipse id="food__body" cx="42" cy="18.5" rx="4" ry="2.5" fill="#4A7C2F"/>
+  <ellipse id="food__lit"  cx="41.2" cy="17.7" rx="2.2" ry="1.1" fill="#6FA544"/>
+
+  <!-- ============ zzz  10 x 9  @ (50,16) ============ -->
+  <path id="zzz__glyph" fill="#3A3A3A"
+        d="M 50 16 L 58 16 L 58 18 L 53.6 22.9 L 58 22.9 L 58 25 L 50 25 L 50 23
+           L 54.4 18.1 L 50 18.1 Z"/>
+
+  <!-- ============ alert 0 (amber)  10 x 13  @ (64,16) ============ -->
+  <path id="alert0__badge" fill="#CC942E"
+        d="M 66 16 L 72 16 C 73.1 16 74 16.9 74 18 L 74 27 C 74 28.1 73.1 29 72 29
+           L 66 29 C 64.9 29 64 28.1 64 27 L 64 18 C 64 16.9 64.9 16 66 16 Z"/>
+  <rect id="alert0__stem" x="68.2" y="18.6" width="1.6" height="5.4" rx="0.8" fill="#F0EDE4"/>
+  <rect id="alert0__dot"  x="68.2" y="25.2" width="1.6" height="1.8" rx="0.8" fill="#F0EDE4"/>
+
+  <!-- ============ alert 1 (red)  10 x 13  @ (78,16) ============ -->
+  <path id="alert1__badge" fill="#B83D2E"
+        d="M 80 16 L 86 16 C 87.1 16 88 16.9 88 18 L 88 27 C 88 28.1 87.1 29 86 29
+           L 80 29 C 78.9 29 78 28.1 78 27 L 78 18 C 78 16.9 78.9 16 80 16 Z"/>
+  <rect id="alert1__stem" x="82.2" y="18.6" width="1.6" height="5.4" rx="0.8" fill="#F0EDE4"/>
+  <rect id="alert1__dot"  x="82.2" y="25.2" width="1.6" height="1.8" rx="0.8" fill="#F0EDE4"/>
+
+  <!-- ============ sparkle 0 / 1  6 x 6  @ (92,16) (100,16) ============ -->
+  <path id="sparkle0__star" fill="#F7E27A"
+        d="M 95 16 C 95.3 17.8 96.2 18.7 98 19 C 96.2 19.3 95.3 20.2 95 22
+           C 94.7 20.2 93.8 19.3 92 19 C 93.8 18.7 94.7 17.8 95 16 Z"/>
+  <path id="sparkle1__star" fill="#F7E27A"
+        d="M 103 17 C 103.2 18.2 103.8 18.8 105 19 C 103.8 19.2 103.2 19.8 103 21
+           C 102.8 19.8 102.2 19.2 101 19 C 102.2 18.8 102.8 18.2 103 17 Z"/>
+
+  <!-- ============ shadow 0/1/2  28 x 4 ============ -->
+  <ellipse id="shadow0__pool" cx="14" cy="34" rx="14"  ry="2"   fill="#000000" fill-opacity="0.22"/>
+  <ellipse id="shadow1__pool" cx="44" cy="34" rx="10.5" ry="1.7" fill="#000000" fill-opacity="0.17"/>
+  <ellipse id="shadow2__pool" cx="74" cy="34" rx="7.5"  ry="1.4" fill="#000000" fill-opacity="0.12"/>
+
+  <!-- ============ puff 0/1/2  10 x 6 ============ -->
+  <circle id="puff0__a" cx="3"  cy="44" r="1.8" fill="#FFFFFF" fill-opacity="0.77"/>
+  <circle id="puff0__b" cx="6"  cy="43" r="2.2" fill="#FFFFFF" fill-opacity="0.77"/>
+  <circle id="puff0__c" cx="8"  cy="44" r="1.6" fill="#FFFFFF" fill-opacity="0.77"/>
+  <circle id="puff1__a" cx="16.4" cy="43.9" r="2.0" fill="#FFFFFF" fill-opacity="0.62"/>
+  <circle id="puff1__b" cx="19.4" cy="42.7" r="2.6" fill="#FFFFFF" fill-opacity="0.62"/>
+  <circle id="puff1__c" cx="21.9" cy="44.0" r="1.9" fill="#FFFFFF" fill-opacity="0.62"/>
+  <circle id="puff2__a" cx="30.3" cy="43.8" r="2.0" fill="#FFFFFF" fill-opacity="0.4"/>
+  <circle id="puff2__b" cx="33.0" cy="42.6" r="2.6" fill="#FFFFFF" fill-opacity="0.4"/>
+  <circle id="puff2__c" cx="35.7" cy="43.9" r="2.1" fill="#FFFFFF" fill-opacity="0.4"/>
+
+  <!-- Footprints. Never drawn; they carry each prop's grid size and origin. -->
+  <g id="boxes" display="none">
+    <rect id="box_glasses"    x="0"   y="0"  width="24" height="6"/>
+    <rect id="box_book"       x="28"  y="0"  width="14" height="11"/>
+    <rect id="box_pencil"     x="46"  y="0"  width="6"  height="10"/>
+    <rect id="box_hardhat"    x="56"  y="0"  width="16" height="7"/>
+    <rect id="box_wrench"     x="76"  y="0"  width="6"  height="11"/>
+    <rect id="box_binoculars" x="86"  y="0"  width="16" height="9"/>
+    <rect id="box_chefhat"    x="0"   y="16" width="14" height="9"/>
+    <rect id="box_pan"        x="18"  y="16" width="16" height="6"/>
+    <rect id="box_food"       x="38"  y="16" width="8"  height="5"/>
+    <rect id="box_zzz"        x="50"  y="16" width="10" height="9"/>
+    <rect id="box_alert0"     x="64"  y="16" width="10" height="13"/>
+    <rect id="box_alert1"     x="78"  y="16" width="10" height="13"/>
+    <rect id="box_sparkle0"   x="92"  y="16" width="6"  height="6"/>
+    <rect id="box_sparkle1"   x="100" y="16" width="6"  height="6"/>
+    <rect id="box_shadow0"    x="0"   y="32" width="28" height="4"/>
+    <rect id="box_shadow1"    x="30"  y="32" width="28" height="4"/>
+    <rect id="box_shadow2"    x="60"  y="32" width="28" height="4"/>
+    <rect id="box_puff0"      x="0"   y="40" width="10" height="6"/>
+    <rect id="box_puff1"      x="14"  y="40" width="10" height="6"/>
+    <rect id="box_puff2"      x="28"  y="40" width="10" height="6"/>
+  </g>
+</svg>

@@ -18,16 +18,18 @@ die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 # ---- 1. dependencies -------------------------------------------------------
 # This exercises the exact call that fails when python3-gi-cairo is missing,
 # rather than just importing cairo, which succeeds either way.
+#
+# Pillow and GdkPixbuf used to be required here. Neither is any more: the art is
+# vector and the daemon draws it with cairo, so nothing loads a PNG. Demanding
+# them would fail an install on a machine that has everything it actually needs.
 $PY - <<'EOF' || die "dependencies missing - see README.md"
 import sys
 try:
     import gi
     gi.require_version("Gtk", "3.0")
     gi.require_version("Gdk", "3.0")
-    gi.require_version("GdkPixbuf", "2.0")
     from gi.repository import Gtk, Gdk
     import cairo
-    from PIL import Image, __version__ as pil
     surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 4, 4)
     cairo.Context(surf)
     Gdk.cairo_region_create_from_surface(surf)   # needs python3-gi-cairo
@@ -35,8 +37,7 @@ except Exception as e:
     print(f"  {type(e).__name__}: {e}", file=sys.stderr)
     sys.exit(1)
 print(f"deps OK   gtk {Gtk.get_major_version()}.{Gtk.get_minor_version()}"
-      f"   pygobject {gi.__version__}"
-      f"   pillow {pil}   python {sys.version.split()[0]}")
+      f"   pygobject {gi.__version__}   python {sys.version.split()[0]}")
 EOF
 
 # The check above proves the libraries are there; it does not prove *this code*
@@ -79,10 +80,14 @@ fi
 rm -f "$D/daemon.pid" "$D/state.json" "$D/prompt_ts"
 rm -rf "${DECK_GUY_HOME:-$HOME/.deck-guy}/sessions" "${DECK_GUY_HOME:-$HOME/.deck-guy}/steps"
 
-# ---- 3. bake the sprite atlas ----------------------------------------------
-$PY "$D/build_sheet.py" >/dev/null || die "sprite build failed"
-$PY "$D/build_sheet.py" --preview >/dev/null || die "preview build failed"
-say "art OK    sprites.png + sprites.json + preview.png"
+# ---- 3. compile the vector art ---------------------------------------------
+# The body and props are drawn from paths now, so there is no atlas to bake.
+# This compiles the two SVG sources into the path tables the daemon imports.
+$PY "$D/build_vector.py" "$D/vector_art.svg" "$D/vector_paths.py" >/dev/null \
+  || die "vector body build failed"
+$PY "$D/build_vector.py" "$D/vector_props.svg" "$D/vector_prop_paths.py" >/dev/null \
+  || die "vector prop build failed"
+say "art OK    vector_paths.py + vector_prop_paths.py"
 
 # ---- 4. wire the hooks -----------------------------------------------------
 mkdir -p "$HOME/.claude"

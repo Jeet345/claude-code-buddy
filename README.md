@@ -35,7 +35,7 @@ any art change.
 | Python 3.8+ | everything | `python3` |
 | PyGObject + GTK 3 | the window | `python3-gi`, `gir1.2-gtk-3.0` |
 | **`python3-gi-cairo`** | the GI↔cairo bridge | `python3-gi-cairo` |
-| Pillow | bakes the sprite atlas | `python3-pil` |
+| *(optional)* Pillow | only for `build_sheet.py`, which bakes the retired pixel atlas | `python3-pil` |
 | X11, or Wayland with XWayland | positioning and click-through | `xwayland` |
 | *(optional)* libwnck **or** `xprop` | jumping to a session's terminal | `gir1.2-wnck-3.0`, or `x11-utils` |
 
@@ -50,7 +50,7 @@ the bridge every frame raises `KeyError: 'could not find foreign type Region'` a
 draws. It is a separate package.
 
 ```bash
-sudo apt install -y python3-gi python3-gi-cairo gir1.2-gtk-3.0 python3-pil
+sudo apt install -y python3-gi python3-gi-cairo gir1.2-gtk-3.0
 ```
 
 <details>
@@ -58,11 +58,11 @@ sudo apt install -y python3-gi python3-gi-cairo gir1.2-gtk-3.0 python3-pil
 
 ```bash
 # Fedora
-sudo dnf install python3-gobject python3-cairo-gobject gtk3 python3-pillow
+sudo dnf install python3-gobject python3-cairo-gobject gtk3
 # Arch
 sudo pacman -S python-gobject python-cairo gtk3 python-pillow
 # openSUSE
-sudo zypper install python3-gobject-Gdk typelib-1_0-Gtk-3_0 python3-cairo python3-Pillow
+sudo zypper install python3-gobject-Gdk typelib-1_0-Gtk-3_0 python3-cairo
 ```
 </details>
 

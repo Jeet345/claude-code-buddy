@@ -1,8 +1,17 @@
-# Baked art - regenerate with `python3 build_sheet.py` from sprites.py.
-# preview.png is NOT here on purpose: README.md embeds it, so it has to be
-# committed or the image is a dead link on GitHub / a fresh clone.
+# Retired pixel atlas. The daemon draws vector paths now and never loads these;
+# `build_sheet.py` still bakes them from the ASCII grids in sprites.py if you
+# want the old art back, but nothing at runtime or install time needs them.
 sprites.png
 sprites.json
+
+# vector_paths.py and vector_prop_paths.py are generated too, by
+# build_vector.py, but they are deliberately NOT ignored. They are small,
+# deterministic text, and committing them means a fresh clone runs with no
+# build step - which the binary atlas above could never offer. install.sh
+# regenerates them anyway, so editing the SVGs still works.
+
+# preview.png is NOT here on purpose: README.md embeds it, so it has to be
+# committed or the image is a dead link on GitHub / a fresh clone.
 
 # Runtime state - per-machine, recreated by notify.sh / guy.py
 daemon.pid

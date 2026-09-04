@@ -60,7 +60,7 @@ try:
 
     gi.require_version("Gtk", "3.0")
     import guy
-    from guy import Creature, Deck, Sprites
+    from guy import Creature, Deck
     HAVE_GTK = True
 except Exception as exc:                                     # pragma: no cover
     print(f"cannot import the daemon ({exc}) - nothing to test")
