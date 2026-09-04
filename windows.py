@@ -69,11 +69,12 @@ class Result:
     the button did nothing, which is the whole point of degrading honestly.
     """
 
-    __slots__ = ("ok", "reason", "name", "xid")
+    __slots__ = ("ok", "reason", "name", "xid", "hint")
 
-    def __init__(self, ok, reason, name="", xid=0):
+    def __init__(self, ok, reason, name="", xid=0, hint=""):
         self.ok = ok
         self.reason = reason      # short, and meant to be shown to a person
+        self.hint = hint          # the longer version, for the log
         self.name = name          # the window's title, when we found one
         self.xid = xid
 
@@ -242,6 +243,33 @@ def find(pids, project=""):
     return None
 
 
+# Names that are never the thing owning a window: the shell the hook ran in,
+# the runtime above it, and the session plumbing at the top of the chain.
+_NOT_A_TERMINAL = {
+    "sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh",
+    "node", "claude", "python3", "python", "env", "su", "sudo", "login",
+    "systemd", "init", "tmux", "screen",
+}
+
+
+def _likely_terminal(pids):
+    """The nearest ancestor that looks like an application rather than a shell.
+
+    Used only to explain a failure. When no window matched, the useful thing to
+    say is *which* program is holding the session, because on Wayland the answer
+    is nearly always that it is a Wayland-native terminal.
+    """
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/comm") as handle:
+                name = handle.read().strip()
+        except OSError:
+            continue
+        if name and name not in _NOT_A_TERMINAL:
+            return name
+    return ""
+
+
 def focus(pids, project=""):
     """Raise this session's terminal. Never raises; always explains itself."""
     if not pids:
@@ -251,6 +279,17 @@ def focus(pids, project=""):
 
     hit = find(pids, project)
     if hit is None:
+        # Name the program instead of shrugging. "no window found" is true and
+        # useless; "ghostty is a Wayland window" tells you both why it failed
+        # and that it will never succeed until that changes.
+        term = _likely_terminal(pids)
+        if term:
+            return Result(
+                False, f"{term} is a Wayland window - can't raise it",
+                hint=(f"{term} has no X11 window, and Wayland does not let one "
+                      f"client raise another's. Start it with GDK_BACKEND=x11 "
+                      f"(it runs on XWayland and gains a raisable window), or "
+                      f"use an X11 terminal."))
         return Result(False, "no window found - Wayland terminal, or it closed")
 
     window, name = hit

@@ -1130,6 +1130,8 @@ class Deck(Gtk.Window):
         self.say("cwd copied - " + r.reason if copied else r.reason, 4.0)
         print(f"focus failed for {s.id[:8]}: {r.reason} "
               f"(pids {s.pids}, cwd copied: {copied})", flush=True)
+        if getattr(r, "hint", ""):
+            print(f"  {r.hint}", flush=True)
         return r
 
     def on_press(self, _w, ev):
