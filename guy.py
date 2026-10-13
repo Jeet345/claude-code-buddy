@@ -664,6 +664,8 @@ class Deck(Gtk.Window):
         self._last_costume = None
         self._last_others = []
         self._walk = {}               # id -> drawn x, easing toward its layout spot
+        self._celebrated = None       # (session, ts) of the last turn he jumped for
+        self._prev_featured = None
         self._leaving = []            # [rig, x, y, w, h, dir, alpha] walking off
 
         # No polling: notify.sh writes a file per session and the store watches
@@ -770,7 +772,13 @@ class Deck(Gtk.Window):
         self.creature.last_activity = now
         self.alerts.clear_local()          # this session is alive after all
         if s.state == "jump":
-            self.creature.set_mode("jump", duration=s.task_secs)
+            # Once per finished turn. The mod rewrites the session file every
+            # 15s as a heartbeat and the state stays "jump" until the next
+            # prompt, so reacting to the state alone celebrated on every beat.
+            key = (s.id, s.ts)
+            if key != self._celebrated and now - s.ts < 15:
+                self._celebrated = key
+                self.creature.set_mode("jump", duration=s.task_secs)
         elif s.state == "working":
             was = self.creature.mode
             self.creature.set_mode("working")
@@ -1361,8 +1369,11 @@ class Deck(Gtk.Window):
         if not self.store:
             return
         c = self.creature
-        ranked = self.store.ranked()
-        featured, others = (ranked[0], ranked[1:]) if ranked else (None, [])
+        featured = self.store.featured()
+        others = self.store.others(featured)
+        stepped_out = self._prev_featured if (featured and self._prev_featured
+                                               and self._prev_featured != featured.id) else None
+        self._prev_featured = featured.id if featured else None
         aw, ah = self.sp.w // AVATAR_DIV, self.sp.h // AVATAR_DIV
         row = layout.avatar_row(c.x, self.sp.w, self.ground_y, (aw, ah),
                                 len(others), self.win_w)
@@ -1386,10 +1397,11 @@ class Deck(Gtk.Window):
         live_ids = {sid for sid, _ in self._avatar_rects}
         for sid in list(self._avatars):
             if sid not in live_ids:
-                # a session that ended walks off the edge rather than vanishing
+                # a session that ended walks off the edge rather than vanishing;
+                # one that became the featured session just merges into him
                 rig = self._avatars.pop(sid)
                 x = self._walk.pop(sid, None)
-                if x is not None:
+                if x is not None and not (featured and sid == featured.id):
                     _y, w, h = self.ground_y - self.sp.h // AVATAR_DIV, self.sp.w // AVATAR_DIV, self.sp.h // AVATAR_DIV
                     away = 1 if x > c.x else -1
                     self._leaving.append([rig, x, _y, w, h, away, 1.0])
@@ -1397,9 +1409,13 @@ class Deck(Gtk.Window):
             rig = self._avatars.get(sid)
             if rig is None:
                 rig = self._avatars[sid] = vector.Rig()
-                # a new session walks in from beyond the far end of the row
-                side = 1 if tx > c.x else -1
-                self._walk[sid] = tx + side * (w * 2.5)
+                if sid == stepped_out:
+                    # he was showing this one a moment ago: it steps out of him
+                    self._walk[sid] = c.x - w / 2
+                else:
+                    # a new session walks in from beyond the far end of the row
+                    side = 1 if tx > c.x else -1
+                    self._walk[sid] = tx + side * (w * 2.5)
             s = self.store.sessions.get(sid)
             moving = self._ease_walk(sid, tx, dt)
             anim = "patrol" if moving else (self._anim_for(s) if s else "idle")

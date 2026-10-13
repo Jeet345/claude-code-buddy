@@ -264,6 +264,34 @@ check("priority: running", s.priority, 2)
 check("priority: done", Session({**MOD, "state": "jump"}).priority, 1)
 check("priority: idle", Session({**MOD, "state": "idle"}).priority, 0)
 
+# featured session is sticky; avatars keep a stable order
+print("store: who he mirrors")
+from sessions import SessionStore  # noqa: E402
+
+def sess(sid, **kw):
+    d = {**MOD, "session_id": sid, "pending": None, "alert": "", "agents": []}
+    d.update(kw)
+    return Session(d)
+
+st = SessionStore(metrics=False)
+a = sess("A", state="working", ts=100, session_started=10)
+b = sess("B", state="working", ts=101, session_started=20)
+st.sessions = {"A": a}
+check("first featured", st.featured(now=102).id, "A")
+st.sessions = {"A": a, "B": b}
+check("busy peer does not steal him", st.featured(now=102).id, "A")
+b2 = sess("B", state="working", ts=103, alert="permission_prompt", session_started=20)
+st.sessions = {"A": a, "B": b2}
+check("a session waiting on you does", st.featured(now=104).id, "B")
+b3 = sess("B", state="idle", ts=104, session_started=20)
+a2 = sess("A", state="working", ts=105, session_started=10)
+st.sessions = {"A": a2, "B": b3}
+check("quiet featured gives way to a busier one", st.featured(now=106).id, "A")
+c = sess("C", state="working", ts=200, session_started=5)
+st.sessions = {"A": a2, "B": b3, "C": c}
+check("others oldest first, featured left out",
+      [x.id for x in st.others(st.featured(now=201))], ["C", "B"])
+
 # notify.sh steps aside for a session the mod owns, and still writes others.
 print("notify.sh: steps aside for the mod")
 sess_dir = Path(TMP) / "sessions"
