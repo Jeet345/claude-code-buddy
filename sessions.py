@@ -28,6 +28,7 @@ SESSIONS_DIR = ROOT / "sessions"
 STEPS_DIR = ROOT / "steps"          # notify.sh keeps its turn timestamps here
 
 STALE_SECS = 45       # no heartbeat this long and the session is presumed dead
+HOLD_SECS = 20        # an idle featured session keeps the buddy this long
 REAP_SECS = 5         # how often we look for those
 LABEL_MAX = 46        # characters of "Tool target" that fit above his head
 
@@ -445,10 +446,34 @@ class SessionStore:
         return sorted(self.sessions.values(), key=lambda s: (s.priority, s.ts),
                       reverse=True)
 
-    def featured(self):
-        """The session the buddy himself mirrors. The rest become avatars."""
+    def featured(self, now=None):
+        """The session the buddy himself mirrors. The rest become avatars.
+
+        Sticky. Re-picking the top of `ranked()` on every event flipped him
+        between two busy sessions on each tool call, and every flip sent one
+        avatar walking off and another walking in. He now changes only when
+        another session needs you more than this one, or this one has gone
+        quiet for a while.
+        """
         ranked = self.ranked()
-        return ranked[0] if ranked else None
+        if not ranked:
+            self._featured_id = None
+            return None
+        best = ranked[0]
+        cur = self.sessions.get(getattr(self, "_featured_id", None))
+        now = now or time.time()
+        if cur is not None and cur is not best and best.priority <= cur.priority:
+            if cur.priority >= 2 or now - cur.ts < HOLD_SECS:
+                return cur
+        self._featured_id = best.id
+        return best
+
+    def others(self, featured=None):
+        """Everyone but the featured session, in a stable order (oldest first),
+        so avatars keep their places instead of reshuffling on every event."""
+        fid = featured.id if featured else None
+        return sorted((s for s in self.sessions.values() if s.id != fid),
+                      key=lambda s: (s.started, s.id))
 
 
 def _reap(path, session_id):
