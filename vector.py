@@ -81,6 +81,8 @@ ANIM_MOTION = {
                 "osc": [("arm_r_raise", 1.5, 1.7, "sine")]},
 }
 
+THINK_DELAY = 1.5     # secs of thinking before the cloud shows
+
 PARAMS = {
     #  name            rest    k     damping
     "stretch":        (1.0, 130.0, 0.68),
@@ -357,7 +359,8 @@ class Rig:
         self.particles = []          # [x, y, vx, vy, life, max_life, kind, colour, spin]
         self._phase = ""
         self._fidget_in = self._rand.uniform(12.0, 25.0)
-        self.thinking = 0.0          # 0..1 fade of the thought dots
+        self.thinking = 0.0          # 0..1 fade of the thought cloud
+        self._think_t = 0.0          # how long the face has been thinking
         self.writing = 0.0           # 0..1 fade of the laptop
 
         self.anim = None
@@ -465,8 +468,12 @@ class Rig:
                 self._fidget_in = self._rand.uniform(15.0, 35.0)
 
         # thought dots fade with the face's own expression
-        want = 1.0 if self.face.expression == "thinking" else 0.0
-        self.thinking += (want - self.thinking) * min(1.0, dt * 5.0)
+        # The cloud waits a beat: thinking between two quick tool calls lasts
+        # a fraction of a second, and a cloud flashing on and off at that rate
+        # read as a glitch rather than as thought.
+        self._think_t = self._think_t + dt if self.face.expression == "thinking" else 0.0
+        want = 1.0 if self._think_t > THINK_DELAY else 0.0
+        self.thinking += (want - self.thinking) * min(1.0, dt * (7.0 if want else 9.0))
         want = 1.0 if self.face.expression == "writing" else 0.0
         self.writing += (want - self.writing) * min(1.0, dt * 6.0)
 
@@ -676,22 +683,60 @@ class Rig:
         cr.restore()
 
     def _draw_thought(self, cr, facing):
-        """Three dots rising off his head while he thinks."""
-        a = self.thinking
+        """A thought cloud over his shoulder, with a typing-style row of dots.
+
+        Grows out of a two-puff trail from his head, floats a little, and the
+        dots inside pulse one after another - the one "thinking" sign people
+        already read without being told.
+        """
+        a = max(0.0, min(1.0, self.thinking))
         if a < 0.02:
             return
+        grow = 0.55 + 0.45 * (1.0 - (1.0 - a) ** 3)      # ease-out pop
+        float_y = math.sin(self.t * 1.6) * 0.35
+        cx, cy = 33.2, 4.6 + float_y
         cr.save()
-        for i in range(3):
-            bob = math.sin(self.t * 4.0 - i * 0.9) * 0.45
-            x = 31.0 + i * 2.6
-            y = 10.0 - i * 2.4 + bob
-            r = 0.75 + i * 0.3
+        cr.push_group()
+        # trail: two small puffs stepping up from his head to the cloud
+        for x, y, r in ((27.6, 10.6, 0.55), (29.6, 8.6, 0.85)):
+            cr.new_sub_path()
+            cr.arc(x, y + float_y * 0.5, r * grow, 0, math.tau)
+        # the cloud: overlapping puffs around an ellipse
+        cr.save()
+        cr.translate(cx, cy)
+        cr.scale(grow, grow)
+        puffs = ((-3.0, 0.4, 1.9), (-1.2, -0.9, 2.2), (1.2, -0.9, 2.1),
+                 (3.0, 0.3, 1.8), (1.4, 1.3, 1.7), (-1.4, 1.3, 1.7))
+        for x, y, r in puffs:
+            cr.new_sub_path()
             cr.arc(x, y, r, 0, math.tau)
-            cr.set_source_rgba(*OUTLINE, a)
-            cr.set_line_width(0.5)
-            cr.stroke_preserve()
-            cr.set_source_rgba(1, 0.98, 0.94, a)
+        cr.restore()
+        path = cr.copy_path()
+        # outline first, fill over it: the puffs merge into one shape
+        cr.set_source_rgb(*OUTLINE)
+        cr.set_line_width(1.1)
+        cr.stroke()
+        cr.append_path(path)
+        cr.set_source_rgb(1.0, 0.985, 0.955)
+        cr.fill()
+        # soft top light, like the body
+        g = cairo.LinearGradient(0, cy - 2.6 * grow, 0, cy + 2.2 * grow)
+        g.add_color_stop_rgba(0, 1, 1, 1, 0.0)
+        g.add_color_stop_rgba(1, 0.86, 0.80, 0.74, 0.35)
+        cr.append_path(path)
+        cr.set_source(g)
+        cr.fill()
+        # typing dots, pulsing in turn
+        for i in range(3):
+            phase = (self.t * 2.2 - i * 0.22) % 1.0
+            lift = math.sin(min(1.0, phase * 2.0) * math.pi) if phase < 0.5 else 0.0
+            x = cx + (i - 1) * 1.9 * grow
+            y = cy + 0.15 - lift * 0.55
+            cr.arc(x, y, (0.58 + lift * 0.14) * grow, 0, math.tau)
+            cr.set_source_rgba(*OUTLINE, 0.55 + lift * 0.45)
             cr.fill()
+        cr.pop_group_to_source()
+        cr.paint_with_alpha(a)
         cr.restore()
 
     def _draw_laptop(self, cr):
