@@ -436,13 +436,16 @@ def preview(out_path="preview.png"):
     cell_w, cell_h = 40 * S + PAD, 32 * S + PAD + 16
     cols = 7
     anim_rows = (len(anims) + cols - 1) // cols
+    import face
+    face_names = list(face.EXPRESSIONS)
+    face_rows = (len(face_names) + cols - 1) // cols
     cost_rows = (len(costumes) + cols - 1) // cols
     prop_cols = 7
     prop_rows = (len(props) + prop_cols - 1) // prop_cols
     prop_h = 30 * S // 2 + 34
 
     width = cols * cell_w + PAD
-    height = (60 + anim_rows * cell_h + 40 + cost_rows * cell_h
+    height = (60 + anim_rows * cell_h + 40 + face_rows * cell_h + 40 + cost_rows * cell_h
               + 40 + prop_rows * prop_h + PAD)
     surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
     cr = cairo.Context(surface)
@@ -477,6 +480,22 @@ def preview(out_path="preview.png"):
         label(name, x, cy + 32 * S + 13)
 
     y += anim_rows * cell_h + 24
+    label("faces", PAD, y, 15, 0.2)
+    y += 16
+    for i, name in enumerate(face_names):
+        col, row = i % cols, i // cols
+        x = PAD + col * cell_w
+        cy = y + row * cell_h
+        rig = vector.Rig(seed=7)
+        rig.blink.step = lambda dt: 0.0          # a mid-blink face is not a face
+        fake = Fake("idle")
+        fake.expression = name
+        for _ in range(90):
+            rig.update(1.0 / 60.0, fake)
+        rig.draw(cr, x, cy, 40 * S, 32 * S)
+        label(name, x, cy + 32 * S + 13)
+
+    y += face_rows * cell_h + 24
     label("costumes", PAD, y, 15, 0.2)
     y += 16
     for i, name in enumerate(costumes):

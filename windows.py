@@ -303,3 +303,32 @@ def focus(pids, project=""):
     except Exception as exc:
         return Result(False, f"could not raise it: {exc}", name)
     return Result(True, "focused", name, window.get_xid())
+
+
+def focused(pids, project=""):
+    """Is this session's terminal the window you are looking at right now?
+
+    True / False, or None when it cannot be told - no backend, no active
+    window reported (a native Wayland compositor reports none to us), or no
+    window for this session at all. The approval flow treats None as "you
+    might not be there", which is the safe reading: it holds the prompt on
+    the buddy, and the terminal still shows a band with an "Answer here" button.
+    """
+    if not pids or not _backend_fn():
+        return None
+    screen = Gdk.Screen.get_default()
+    if screen is None:
+        return None
+    try:
+        active = screen.get_active_window()
+    except Exception:
+        active = None
+    if active is None:
+        return None
+    hit = find(pids, project)
+    if hit is None:
+        return None
+    try:
+        return hit[0].get_xid() == active.get_xid()
+    except Exception:
+        return None

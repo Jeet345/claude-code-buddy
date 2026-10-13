@@ -1,6 +1,7 @@
 # Deck Guy — from desktop pet to live HUD
 
-**Status:** **v1 is built and running** — phases 1, 2 and 3, plus the terminal-focusing half
+**Status (2026-10-13):** hooks replaced by the `deck-buddy` Claude Code mod; phase 4 and
+phase 5a built on it. Phases 6-7 dropped for now. Earlier: **v1 is built and running** — phases 1, 2 and 3, plus the terminal-focusing half
 of phase 4. The rest of 4 and phases 5-7 are still planning only. The pet itself (PLAN.md
 phases 0-4) is done.
 **Written:** 2026-07-29 · **phase 1:** 2026-07-30 · **phases 2 and 3:** 2026-08-01 ·

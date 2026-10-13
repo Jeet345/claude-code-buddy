@@ -51,6 +51,7 @@ class Metrics:
         self.partial = False       # totals started mid-file, so they under-count
         self.bad = 0               # lines skipped
         self.compacted = None      # (pre, post) of the last compaction we saw
+        self.live = False          # measured by the engine (the mod), not read back
 
     @property
     def fill(self):

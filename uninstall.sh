@@ -69,6 +69,18 @@ if pgrep -f "$D/guy.py" >/dev/null 2>&1 || pgrep -f 'python3 \./guy\.py' >/dev/n
 fi
 [ "$stopped" = 1 ] && done_say "stopped   the daemon" || say "stopped   nothing was running"
 
+# ---- 1b. the mod -------------------------------------------------------------
+# install.sh adds this folder as the `deck-guy` marketplace and installs
+# deck-buddy from it. Remove both; either may already be gone.
+if command -v claude >/dev/null 2>&1 &&
+   claude plugin list 2>/dev/null | grep -q "deck-buddy@deck-guy"; then
+    run claude plugin uninstall deck-buddy@deck-guy >/dev/null 2>&1
+    run claude plugin marketplace remove deck-guy >/dev/null 2>&1
+    done_say "mod       deck-buddy uninstalled"
+else
+    say "mod       not installed"
+fi
+
 # ---- 2. unwire the hooks ---------------------------------------------------
 # Same rule install.sh uses to recognise its own entries: the command runs a
 # notify.sh, wherever it was installed from. Matching on the folder name breaks

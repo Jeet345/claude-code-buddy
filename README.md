@@ -86,7 +86,64 @@ cd claude-buddy
 ./install.sh
 ```
 
-Restart Claude Code afterwards — hooks load at session start.
+Restart Claude Code afterwards (or run `/reload-plugins`).
+
+### The mod, and why there are no hooks any more
+
+Claude Code can load **mods**: a TypeScript module that hooks the engine's own events
+from inside the process. `mod/deck-buddy/` is one, and `install.sh` installs it from this
+folder (`claude plugin marketplace add .` then `claude plugin install deck-buddy@deck-guy`)
+instead of writing ten hook entries into `settings.json`. It writes the same
+`~/.deck-guy/sessions/<id>.json` the daemon already watched, so the daemon barely
+noticed the swap — but it writes more than a hook ever could:
+
+| | hooks + `notify.sh` | the mod |
+|---|---|---|
+| thinking vs writing a reply | guessed from the gap | `turn.step` says which |
+| which call a permission prompt is about | spliced in from the last tool | `tool.check` hands over the exact call, at once |
+| tokens, context, cost | tailed from the transcript JSONL | `session.measure`, the engine's own figures |
+| subagents | not visible | `agent.spawn` / `SubagentStop` |
+| cost per tool call | a bash fork, ~4ms ×2 | none |
+| answering a prompt from the buddy | impossible | yes, see below |
+
+`/buddy` in Claude Code shows what the mod sees: whether the daemon is reachable, the
+approve and guard switches, and the session's phase.
+
+`./install.sh --hooks` wires the old hooks instead, for a Claude Code that cannot load
+mods. Both can coexist: `notify.sh` steps aside for any session the mod owns.
+
+### Answering prompts from the buddy
+
+**Off by default** — it is the one feature that acts. Turn it on with `/buddy approve on`
+or right-click → **Answer prompts from buddy**.
+
+The buddy only steps in when Claude Code is actually about to stop and ask you - the
+moment its dialog would open (`PermissionRequest`), after your allow rules and after auto
+mode's classifier. A call auto mode approves by itself never reaches him.
+
+When that dialog is about to open and **your terminal is not the focused window**,
+the buddy shows the call — the whole command, never a shortened label — with
+**Allow**, **Allow 10 min** (that exact call again, this session), **Deny** and
+**In terminal**. Claude Code waits, and its prompt band says the buddy is holding it,
+with an *Answer here* button.
+
+Everything that is not a click on Allow or Deny falls back to Claude Code's own dialog:
+the terminal already focused, you switching back to it while the card is up, the turn
+interrupted, the daemon not running or crashing, a reply that does not name the exact
+call. A new card ignores clicks for its first second, so it cannot catch a click meant
+for whatever was under it. The socket is `~/.deck-guy/buddy.sock`, mode 0600.
+
+`/buddy guard on` is a separate, opt-in guard: it denies `rm -rf`, force pushes,
+`git reset --hard`, `git clean -f`, writes to block devices, `chmod 777`, piping a
+download into a shell, and edits to `.env` / SSH keys / credential files — even in
+modes that would allow them — with a reason telling Claude to ask you.
+
+### Many sessions
+
+He mirrors the session that most wants you — **waiting on you > failed > running >
+just finished > idle** — and every other live session stands beside him at half size,
+with a dot for its state. Hover one for its readout; click it to jump to its terminal.
+The featured session's subagents trail behind him, smaller still.
 
 That script is safe to re-run and does five things:
 
@@ -95,7 +152,9 @@ That script is safe to re-run and does five things:
    *these* library versions (needs no display)
 2. stops any running copy **by pid** and clears stale session state
 3. bakes `sprites.png`, `sprites.json` and `preview.png` from `sprites.py`
-4. merges ten hook entries into `~/.claude/settings.json`, backing it up first
+4. installs the `deck-buddy` mod and removes his old hook entries from
+   `~/.claude/settings.json` (backing it up first) — or, with `--hooks` or when the mod
+   cannot load, merges the ten hook entries instead
 5. starts the daemon and tells you the pid
 
 The hook merge keeps every other key and every hook that is not his, and replaces
@@ -173,8 +232,8 @@ GTK's linking. `notify.sh` always strips them.
 | Flag | Does |
 |---|---|
 | `--demo` | cycles every pose and costume, ignores hooks — the fastest way to see the art |
-| `--scale N` | pixel size, default 3 (he is 40×32 authored, so 120×96 on screen) |
-| `--height N` | height of the invisible strip he lives in, default 400 |
+| `--scale N` | pixel size, default 4 (he is 40×32 authored, so 160×128 on screen) |
+| `--height N` | height of the invisible strip he lives in, default 460 |
 | `--idle-secs N` | seconds of nothing before he sleeps, default 300 |
 | `--no-log` | print to the terminal instead of `guy.log` |
 | `--no-shape` | skip click-through, for debugging where the window actually is |
@@ -189,6 +248,8 @@ he **jumps you to that session's terminal** and waves. Hover him for the readout
 | **Desktop notifications** | `notify-send` toasts for alerts. On by default, remembered |
 | **Alert sound** | a beep. **Off** by default, remembered. Independent of the toast |
 | **Click jumps to terminal** | what a left-click does. On by default, remembered |
+| **Answer prompts from buddy** | hold permission prompts on him while you are elsewhere — off by default, remembered |
+| **Size** | Small / Medium / Large / Huge, applied live and remembered (`--scale` overrides) |
 | Focus terminal | do it now, without clicking — still there when the click is turned off |
 | Wave / Jump! / Nap now | play a state on demand |
 | Costume: … | force a costume, for checking the art |
@@ -444,9 +505,12 @@ is how both of the last two real bugs were found.
 guy.py           the daemon: window, animation, state machine
 sprites.py       the art, as ASCII grids + palette + anchors  <- edit this
 build_sheet.py   bakes sprites.png / sprites.json / preview.png
+mod/deck-buddy/  the Claude Code mod: session state, metrics, subagents, prompts
+bridge.py        the socket the mod asks over; held prompts and their answers
+layout.py        where the other sessions' avatars and the sidekicks stand
 sessions.py      live sessions: parse, reap, work out what to call the target
 bubble.py        the speech bubble, hover panel and context meter
-transcript.py    tails the transcript JSONL for tokens, context and cost
+transcript.py    tails the transcript JSONL for tokens, context and cost (hook sessions)
 prices.py        the price table and context windows  <- this one rots, check it
 alerts.py        who is waiting on you, escalation, toasts and sound
 windows.py       pid chain -> X window -> raise it, and an honest "cannot"
@@ -456,9 +520,10 @@ test_transcript.py  python3 test_transcript.py  (no display needed)
 test_alerts.py   python3 test_alerts.py      (no display needed)
 test_windows.py  python3 test_windows.py     (live checks skipped without a display)
 test_interactions.py  clicking him at the worst possible moment  (needs a display)
+test_mod.py      bridge over a real socket, layout, mod sessions  (no display needed)
 check_hooks.py   are the hooks wired, real, and actually firing
-notify.sh        the hook target; writes a session file, starts the daemon
-install.sh       dependency check, art build, hook wiring
+notify.sh        the hook target (hooks mode); steps aside for mod sessions
+install.sh       dependency check, art build, mod install (or hook wiring)
 uninstall.sh     stop him, unwire the hooks, clear state  (--purge, --dry-run)
 PLAN.md          how the pet is built and why, plus every gotcha hit
 ROADMAP.md       the plan to turn him into a live Claude Code HUD
