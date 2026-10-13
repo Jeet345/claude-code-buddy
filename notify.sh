@@ -176,6 +176,15 @@ esac
 write_session=1
 [ "$ensure" = 1 ] && [ -z "$g_session_id" ] && write_session=0
 
+# The deck-buddy mod writes this session itself, with more than a hook can see.
+# Writing over it would erase the phase, metrics and held prompt it recorded,
+# so step aside. The mod puts `"source":"mod"` first on the first line, and
+# `read` is a builtin: one open, no fork.
+if [ "$write_session" = 1 ] && [ -r "$SESS/$sid.json" ]; then
+    IFS= read -r first < "$SESS/$sid.json"
+    [[ $first =~ ^\{[[:space:]]*\"source\"[[:space:]]*:[[:space:]]*\"mod\" ]] && write_session=0
+fi
+
 # Guard on the steps dir, not the sessions dir: the daemon creates sessions/ for
 # its own file monitor, so testing that one would leave steps/ missing and every
 # turn timestamp would silently fail to write.

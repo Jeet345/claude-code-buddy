@@ -1,0 +1,7 @@
+{
+  "name": "deck-buddy",
+  "version": "0.1.0",
+  "author": { "name": "jeet-mendapara-us" },
+  "description": "Feeds the claude-buddy desktop creature live session state, and lets you answer permission prompts from him.",
+  "types": "./types/index.d.ts"
+}
