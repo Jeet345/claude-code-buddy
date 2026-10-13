@@ -1,11 +1,15 @@
 #!/bin/bash
 # Install the buddy on this machine.
 #
-#   ./install.sh            check deps, bake sprites, wire hooks, start him
+#   ./install.sh            check deps, bake art, install the deck-buddy mod, start him
+#   ./install.sh --hooks    the same, but wire settings.json hooks instead of the mod
+#                           (for a Claude Code without mods; this is how v1 worked)
 #   ./install.sh --check    check deps only, change nothing
 #
-# Safe to re-run. The hook merge keeps every other key in settings.json and
-# replaces only his own hook entries, so it is idempotent.
+# Safe to re-run. The mod is installed from this folder as a marketplace, so a
+# re-run (or `/reload-plugins`) picks up edits here. Installing the mod removes
+# his old hook entries from settings.json and nothing else; --hooks puts them
+# back and replaces only his own, so either way it is idempotent.
 
 set -u
 D="$(cd "${0%/*}" && pwd)"
@@ -89,12 +93,39 @@ $PY "$D/build_vector.py" "$D/vector_props.svg" "$D/vector_prop_paths.py" >/dev/n
   || die "vector prop build failed"
 say "art OK    vector_paths.py + vector_prop_paths.py"
 
-# ---- 4. wire the hooks -----------------------------------------------------
+# ---- 4. the mod, or the hooks ----------------------------------------------
+# The mod sees everything the hooks did and more (thinking vs writing, live
+# metrics, subagents, the exact call behind a permission prompt), costs no
+# fork per tool call, and is what lets him answer prompts. Hooks remain for a
+# CLI that cannot load it.
+WIRE=hooks
+if [ "${1:-}" != "--hooks" ]; then
+    if ! command -v claude >/dev/null 2>&1; then
+        say "warn: no claude CLI on PATH - wiring hooks instead of the mod"
+    elif ! claude plugin validate "$D/mod/deck-buddy" >/dev/null 2>&1; then
+        say "warn: this Claude Code cannot load the mod - wiring hooks instead"
+        say "      (see: claude plugin validate $D/mod/deck-buddy)"
+    else
+        # Re-adding a marketplace that is already there is refused; that is fine.
+        claude plugin marketplace add "$D" >/dev/null 2>&1
+        if claude plugin install deck-buddy@deck-guy --scope user >/dev/null 2>&1 ||
+           claude plugin list 2>/dev/null | grep -q "deck-buddy@deck-guy"; then
+            WIRE=mod
+            say "mod OK    deck-buddy@deck-guy, read from $D/mod/deck-buddy"
+        else
+            say "warn: installing the mod failed - wiring hooks instead"
+            say "      (try: claude plugin install deck-buddy@deck-guy)"
+        fi
+    fi
+fi
+
 mkdir -p "$HOME/.claude"
 [ -f "$SETTINGS" ] && cp "$SETTINGS" "$SETTINGS.bak-deckguy"
-D="$D" SETTINGS="$SETTINGS" python3 - <<'EOF' || die "could not write settings.json"
+WIRE="$WIRE" D="$D" SETTINGS="$SETTINGS" python3 - <<'EOF' || die "could not write settings.json"
 import json, os, pathlib
 D, S = os.environ["D"], pathlib.Path(os.environ["SETTINGS"])
+if not S.exists() and os.environ["WIRE"] == "mod":
+    raise SystemExit(0)                      # nothing of ours to remove
 cfg = json.loads(S.read_text()) if S.exists() and S.read_text().strip() else {}
 hooks = cfg.setdefault("hooks", {})
 # Every tool-scoped event gets the "*" matcher; Notification matches on
@@ -121,17 +152,23 @@ def ours(group):
             return True
     return False
 
+mod = os.environ["WIRE"] == "mod"
 for event, arg in want.items():
     groups = hooks.setdefault(event, [])
     groups[:] = [g for g in groups if not ours(g)]      # leave everyone else alone
+    if mod:
+        continue                                        # the mod replaces these
     g = {"hooks": [{"type": "command", "command": f"{D}/notify.sh {arg}"}]}
     if event in SCOPED:
         g["matcher"] = "*"
     groups.append(g)
 for event in [e for e, groups in hooks.items() if not groups]:
     del hooks[event]                                   # an event we no longer use
+if not hooks:
+    del cfg["hooks"]
 S.write_text(json.dumps(cfg, indent=2) + "\n")
-print(f"hooks OK  {len(want)} events -> {D}/notify.sh")
+print("hooks     removed - the mod does their job" if mod
+      else f"hooks OK  {len(want)} events -> {D}/notify.sh")
 EOF
 
 # ---- 5. start him ----------------------------------------------------------
@@ -143,4 +180,10 @@ if [ -r "$D/daemon.pid" ] && kill -0 "$(cat "$D/daemon.pid")" 2>/dev/null; then
 else
     say "warn: daemon did not start - read $D/guy.crash.log, or run '$PY $D/guy.py --no-log'"
 fi
-say "Restart Claude Code to load the hooks."
+if [ "$WIRE" = mod ]; then
+    say "Restart Claude Code (or run /reload-plugins) to load the mod. /buddy shows its status."
+    say "Answering prompts from the buddy is off until you turn it on: /buddy approve on,"
+    say "or right-click him -> Answer prompts from buddy."
+else
+    say "Restart Claude Code to load the hooks."
+fi

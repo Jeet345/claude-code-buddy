@@ -28,3 +28,8 @@ guy.crash.log
 
 __pycache__/
 *.pyc
+
+# Written into the mod folder by Claude Code each time it loads the mod: this
+# build's API declarations and the tsconfig that extends them. Regenerated, never edited.
+mod/deck-buddy/.claude-plugin/types/
+mod/deck-buddy/tsconfig.json

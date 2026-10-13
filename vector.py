@@ -26,6 +26,7 @@ cell.
 """
 
 import math
+import random
 
 import cairo
 
@@ -39,6 +40,7 @@ except ImportError as error:                      # pragma: no cover
         "  python3 build_vector.py vector_art.svg   vector_paths.py\n"
         "  python3 build_vector.py vector_props.svg vector_prop_paths.py\n"
         "(install.sh does this for you.)") from error
+from face import Face, expression_for
 from vector_motion import Blink, Breath, Follow, Oscillator, Spring, squash
 
 # Palette, taken from sprites.PALETTE so the two renderers cannot drift.
@@ -65,14 +67,14 @@ ANIM_MOTION = {
     "blink":   {"breath": 0.25, "eye": 1.00},
     "patrol":  {"breath": 0.45, "eye": 1.00, "legs": 2.0, "lift": 1.6,
                 "osc": [("bob", 0.45, 2.0, "sine")]},
-    "working": {"breath": 0.55, "eye": 0.55, "stretch": 0.96,
+    "working": {"breath": 0.55, "eye": 0.95, "stretch": 0.96,
                 "osc": [("bob", 0.55, 1.2, "sine"),
                         ("arm_l_raise", 0.5, 1.2, "sine")]},
     "jump":    {"breath": 0.60, "eye": 1.15, "stretch": 1.05,
                 "arm": 0.8},
     "sleep":   {"breath": 0.12, "eye": 0.06, "stretch": 0.90, "arm": -0.35,
                 "osc": [("bob", 0.5, 0.12, "sine")]},
-    "error":   {"breath": 0.30, "eye": 0.45, "stretch": 0.92, "arm": -0.3,
+    "error":   {"breath": 0.30, "eye": 1.00, "stretch": 0.92, "arm": -0.3,
                 "osc": [("tilt", 1.4, 0.55, "sway")]},
     "wake":    {"breath": 0.40, "eye": 1.15, "stretch": 1.07, "arm": 0.5},
     "wave":    {"breath": 0.35, "eye": 1.05,
@@ -341,6 +343,22 @@ class Rig:
         self.arm_r = Follow(0.0, k=49.0, damping=0.42)
         self.blink = Blink(seed=seed)
         self.breath = Breath(rate=0.25)
+        self.face = Face(seed=seed)
+        self._rand = random.Random(seed)
+        # The antenna: a stalk on a spring that lags behind his motion, with a
+        # bulb that is also a status light. The single cheapest piece of charm
+        # here - every hop, turn and breath shows up in it a beat late.
+        self.stalk = Spring(0.0, k=70.0, damping=0.28)
+        self.light = None            # (r, g, b) or None; set by the daemon
+        self.antenna_lift = 0.0      # grid units taller, so the bulb clears a hat
+        self._lift = 0.0
+        self.light_pulse = False
+        self._last_x = None
+        self.particles = []          # [x, y, vx, vy, life, max_life, kind, colour, spin]
+        self._phase = ""
+        self._fidget_in = self._rand.uniform(12.0, 25.0)
+        self.thinking = 0.0          # 0..1 fade of the thought dots
+        self.writing = 0.0           # 0..1 fade of the laptop
 
         self.anim = None
         self.gestures = ()
@@ -374,7 +392,10 @@ class Rig:
 
     def update(self, dt, creature):
         if creature.anim != self.anim:
+            if creature.anim == "jump" or (creature.anim == "wake" and self.anim == "sleep"):
+                self.p["stretch"].nudge(-2.5)            # a little startle squash
             self._adopt(creature.anim)
+        self._motion_extras(dt, creature)
 
         # Vertical travel is the jump arc's job, not ours. What we take from it
         # is the speed, because that is what squash and stretch are made of.
@@ -388,6 +409,12 @@ class Rig:
             self.offsets[gesture.param] = (self.offsets.get(gesture.param, 0.0)
                                            + gesture.value(self.t))
 
+        if self.writing > 0.3:
+            # typing: quick alternating taps, out of phase hand to hand
+            tap = self.writing * 0.55
+            self.offsets["arm_l_raise"] = self.offsets.get("arm_l_raise", 0.0) + tap * max(0.0, math.sin(self.t * 15.0))
+            self.offsets["arm_r_raise"] = self.offsets.get("arm_r_raise", 0.0) + tap * max(0.0, math.sin(self.t * 15.0 + math.pi))
+
         for spring in self.p.values():
             spring.step(dt)
 
@@ -396,9 +423,93 @@ class Rig:
         if self.leg_rate > 0.0:
             self.leg_phase = (self.leg_phase + dt * self.leg_rate) % 1.0
 
+        # The face picks its own expression from the posture unless someone
+        # who knows more (the daemon: thinking, writing, waiting on you) says.
+        expression = getattr(creature, "expression", None) or expression_for(creature.anim)
+        self.face.update(dt, expression, eye_h=self.value("eye_h"), lid=self.lid)
+
         self.arm_l.step(self.value("arm_l_raise"), dt)
         self.arm_r.step(self.value("arm_r_raise"), dt)
         self.squash_x, self.squash_y = squash(-self._y_speed, gain=0.0012)
+
+    def _motion_extras(self, dt, creature):
+        """Antenna, jump anticipation and landing, particles, idle fidgets."""
+        # antenna lags horizontal travel and vertical speed
+        x = float(getattr(creature, "x", 0.0) or 0.0)
+        vx = (x - self._last_x) / dt if (self._last_x is not None and dt > 0) else 0.0
+        self._last_x = x
+        facing = getattr(creature, "facing", 1) or 1
+        self.stalk.target = max(-1.0, min(1.0, -vx * 0.01 * facing))
+        self.stalk.nudge(self._y_speed * 0.004)
+        self.stalk.step(dt)
+        self._lift += (self.antenna_lift - self._lift) * min(1.0, dt * 8.0)
+
+        phase = getattr(creature, "jump_phase", "") or ""
+        if phase != self._phase:
+            if phase == "crouch":
+                self.p["stretch"].target = 0.80              # anticipation
+            elif phase == "air":
+                self.p["stretch"].target = ANIM_MOTION["jump"].get("stretch", 1.0)
+                self.p["stretch"].nudge(4.0)                 # launch
+                if self._phase in ("crouch", ""):
+                    self._confetti(10 + int(getattr(creature, "y_off", 0) or 0) // 3)
+            elif phase == "land":
+                self.p["stretch"].nudge(-4.5)                # squash on impact
+                self._dust()
+            self._phase = phase
+
+        if creature.anim == "idle" and not phase:
+            self._fidget_in -= dt
+            if self._fidget_in <= 0:
+                self._fidget()
+                self._fidget_in = self._rand.uniform(15.0, 35.0)
+
+        # thought dots fade with the face's own expression
+        want = 1.0 if self.face.expression == "thinking" else 0.0
+        self.thinking += (want - self.thinking) * min(1.0, dt * 5.0)
+        want = 1.0 if self.face.expression == "writing" else 0.0
+        self.writing += (want - self.writing) * min(1.0, dt * 6.0)
+
+        alive = []
+        for p in self.particles:
+            p[4] -= dt
+            if p[4] <= 0:
+                continue
+            p[0] += p[2] * dt
+            p[1] += p[3] * dt
+            p[3] += (18.0 if p[6] == "confetti" else -2.0) * dt   # gravity / drift up
+            p[2] *= (1.0 - 1.8 * dt) if p[6] == "dust" else 1.0
+            p[8] += dt * 6.0
+            alive.append(p)
+        self.particles = alive
+
+    def _fidget(self):
+        pick = self._rand.choice(("look", "look", "stretch", "bounce", "blink"))
+        if pick == "look":
+            self.face.look(self._rand.choice((-1.0, 1.0)), self._rand.uniform(-0.5, 0.3), hold=1.1)
+        elif pick == "stretch":
+            self.p["stretch"].nudge(3.0)
+        elif pick == "bounce":
+            self.p["bob"].nudge(-14.0)
+            self.stalk.nudge(6.0)
+        else:
+            self.blink.force(double=True)
+
+    def _dust(self):
+        for side in (-1, 1):
+            for i in range(3):
+                self.particles.append([20.0 + side * (6 + i * 2.5), 31.0,
+                                       side * self._rand.uniform(6, 14), -self._rand.uniform(1, 4),
+                                       0.45, 0.45, "dust", None, 0.0])
+
+    def _confetti(self, n):
+        colours = ((0.95, 0.75, 0.25), (0.42, 0.62, 0.90), (0.55, 0.78, 0.45),
+                   (0.92, 0.45, 0.50), (0.75, 0.55, 0.88))
+        for _ in range(n):
+            self.particles.append([20.0 + self._rand.uniform(-6, 6), 12.0,
+                                   self._rand.uniform(-16, 16), -self._rand.uniform(14, 26),
+                                   1.3, 1.3, "confetti", self._rand.choice(colours),
+                                   self._rand.uniform(0, math.tau)])
 
     def value(self, name):
         return self.p[name].x + self.offsets.get(name, 0.0)
@@ -458,6 +569,8 @@ class Rig:
         cr.translate(inset, inset)
         cr.scale((VW - inset * 2.0) / VW, (VH - inset * 2.0) / VH)
 
+        self._draw_particles(cr, "dust")
+
         if facing < 0:
             cr.translate(VW, 0.0)
             cr.scale(-1.0, 1.0)
@@ -483,6 +596,8 @@ class Rig:
         # limb's outline across the torso it is joined to; doing every stroke
         # before any fill leaves the seams covered and only the silhouette
         # outlined.
+        self._draw_antenna(cr)
+
         cr.set_line_join(cairo.LINE_JOIN_ROUND)
         cr.set_line_width(OUTLINE_W * 2.0)
         cr.set_source_rgb(*OUTLINE)
@@ -492,9 +607,153 @@ class Rig:
         cr.set_source(self._gradient())
         for _ in self._parts(cr):
             cr.fill()
+        self._draw_sheen(cr)
 
-        self._draw_eyes(cr)
+        self.face.draw(cr, skin=self._gradient())
+        self._draw_thought(cr, facing)
+        self._draw_laptop(cr)
         cr.restore()
+        cr.save()
+        cr.translate(x, y)
+        cr.scale(w / VW, h / VH)
+        self._draw_particles(cr, "confetti")
+        cr.restore()
+
+    def _draw_antenna(self, cr):
+        """Stalk from the top of his head, bulb on the end. Drawn before the
+        body so the body's outline covers the root."""
+        base_x, base_y = 20.0, 12.4
+        sway = self.stalk.x
+        tip_x = base_x + 1.2 + sway * 2.6
+        tip_y = base_y - 4.6 - self._lift + abs(sway) * 0.6
+        cr.save()
+        cr.set_line_cap(cairo.LINE_CAP_ROUND)
+        cr.move_to(base_x, base_y + 0.6)
+        cr.curve_to(base_x, base_y - 2.0, tip_x - sway * 1.2, tip_y + 1.6, tip_x, tip_y)
+        cr.set_source_rgb(*OUTLINE)
+        cr.set_line_width(1.6)
+        cr.stroke_preserve()
+        cr.set_source_rgb(*SHADE)
+        cr.set_line_width(0.6)
+        cr.stroke()
+        r = 1.25
+        colour = self.light or LIT
+        glow = 0.0
+        if self.light is not None:
+            glow = 0.35 + (0.25 * (0.5 + 0.5 * math.sin(self.t * 4.0)) if self.light_pulse else 0.15)
+            halo = cairo.RadialGradient(tip_x, tip_y, 0, tip_x, tip_y, r * 3.2)
+            halo.add_color_stop_rgba(0, *colour, glow)
+            halo.add_color_stop_rgba(1, *colour, 0.0)
+            cr.set_source(halo)
+            cr.arc(tip_x, tip_y, r * 3.2, 0, math.tau)
+            cr.fill()
+        cr.arc(tip_x, tip_y, r, 0, math.tau)
+        cr.set_source_rgb(*OUTLINE)
+        cr.set_line_width(0.9)
+        cr.stroke_preserve()
+        bulb = cairo.RadialGradient(tip_x - 0.4, tip_y - 0.45, 0.1, tip_x, tip_y, r)
+        bulb.add_color_stop_rgb(0, *[min(1.0, c + 0.3) for c in colour])
+        bulb.add_color_stop_rgb(1, *colour)
+        cr.set_source(bulb)
+        cr.fill()
+        cr.restore()
+
+    def _draw_sheen(self, cr):
+        """A soft highlight along the top of the body: light from above, and
+        the difference between a flat sticker and something with volume."""
+        bx, by, bw, bh = art.BOXES["body"]
+        cr.save()
+        art.path(cr, "body")
+        cr.clip()
+        cr.translate(bx + bw * 0.42, by + 1.6)
+        cr.scale(bw * 0.42, 2.4)
+        g = cairo.RadialGradient(0, 0, 0, 0, 0, 1)
+        g.add_color_stop_rgba(0, 1, 1, 1, 0.30)
+        g.add_color_stop_rgba(1, 1, 1, 1, 0.0)
+        cr.set_source(g)
+        cr.arc(0, 0, 1, 0, math.tau)
+        cr.fill()
+        cr.restore()
+
+    def _draw_thought(self, cr, facing):
+        """Three dots rising off his head while he thinks."""
+        a = self.thinking
+        if a < 0.02:
+            return
+        cr.save()
+        for i in range(3):
+            bob = math.sin(self.t * 4.0 - i * 0.9) * 0.45
+            x = 31.0 + i * 2.6
+            y = 10.0 - i * 2.4 + bob
+            r = 0.75 + i * 0.3
+            cr.arc(x, y, r, 0, math.tau)
+            cr.set_source_rgba(*OUTLINE, a)
+            cr.set_line_width(0.5)
+            cr.stroke_preserve()
+            cr.set_source_rgba(1, 0.98, 0.94, a)
+            cr.fill()
+        cr.restore()
+
+    def _draw_laptop(self, cr):
+        """The back of a small laptop in front of him while he writes a reply."""
+        a = self.writing
+        if a < 0.02:
+            return
+        rise = (1.0 - a) * 3.0                     # slides up into place
+        x0, x1, top, base = 13.6, 26.4, 23.6 + rise, 29.4 + rise
+        cr.save()
+        cr.push_group()
+        art_round = 1.0
+        # lid, seen from behind
+        cr.new_sub_path()
+        cr.arc(x1 - art_round, top + art_round, art_round, -math.pi / 2, 0)
+        cr.line_to(x1, base)
+        cr.line_to(x0, base)
+        cr.arc(x0 + art_round, top + art_round, art_round, math.pi, 1.5 * math.pi)
+        cr.close_path()
+        g = cairo.LinearGradient(0, top, 0, base)
+        g.add_color_stop_rgb(0, 0.80, 0.82, 0.86)
+        g.add_color_stop_rgb(1, 0.58, 0.60, 0.66)
+        cr.set_source(g)
+        cr.fill_preserve()
+        cr.set_source_rgb(0.25, 0.26, 0.30)
+        cr.set_line_width(0.55)
+        cr.stroke()
+        # glowing logo
+        lx, ly = (x0 + x1) / 2, (top + base) / 2
+        glow = cairo.RadialGradient(lx, ly, 0, lx, ly, 2.2)
+        glow.add_color_stop_rgba(0, 1.0, 1.0, 1.0, 0.9)
+        glow.add_color_stop_rgba(1, 1.0, 1.0, 1.0, 0.0)
+        cr.set_source(glow)
+        cr.arc(lx, ly, 2.2, 0, math.tau)
+        cr.fill()
+        # base, a thin slab in front
+        cr.rectangle(x0 - 1.2, base, (x1 - x0) + 2.4, 0.9)
+        cr.set_source_rgb(0.38, 0.40, 0.45)
+        cr.fill()
+        cr.pop_group_to_source()
+        cr.paint_with_alpha(a)
+        cr.restore()
+
+    def _draw_particles(self, cr, kind):
+        for x, y, _vx, _vy, life, max_life, k, colour, spin in self.particles:
+            if k != kind:
+                continue
+            fade = max(0.0, min(1.0, life / max_life * 1.6))
+            if k == "dust":
+                grow = 1.0 - life / max_life
+                cr.set_source_rgba(0.85, 0.80, 0.74, 0.55 * fade)
+                cr.arc(x, y, 0.8 + grow * 1.4, 0, math.tau)
+                cr.fill()
+            else:
+                cr.save()
+                cr.translate(x, y)
+                cr.rotate(spin)
+                cr.scale(1.0, abs(math.cos(spin * 1.3)) * 0.9 + 0.1)
+                cr.set_source_rgba(*colour, fade)
+                cr.rectangle(-0.55, -0.35, 1.1, 0.7)
+                cr.fill()
+                cr.restore()
 
     def _draw_eyes(self, cr):
         lid = max(0.0, min(1.0, self.lid))

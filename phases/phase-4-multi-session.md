@@ -1,6 +1,7 @@
 # Phase 4 — Many sessions, one buddy
 
-**Status:** partly built — tasks 1 and 5 are done (**click him to focus that session's
+**Status:** **built** 2026-10-13 — avatars (`layout.py`), the priority rule
+(`Session.priority`), sidekicks for subagents (from the mod's `agent.spawn`). Was: partly built — tasks 1 and 5 are done (**click him to focus that session's
 terminal**, in `windows.py`). The avatar row, the layout module and the priority rule are
 not started, so today the gesture applies to the buddy himself, who mirrors the newest
 session as he always has.

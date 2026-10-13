@@ -71,9 +71,14 @@ except Exception as exc:                                     # pragma: no cover
 class Ev:
     """A GDK button/motion event, as much of one as the handlers touch."""
 
-    def __init__(self, button=1, x_root=0.0):
+    def __init__(self, button=1, x_root=0.0, x=-1e6, y=-1e6):
         self.button = button
         self.x_root = x_root
+        # Window coordinates. Off the strip by default: on him is what the
+        # input shape guarantees, and these tests are not about the card or
+        # the avatars, which hit-test on x/y.
+        self.x = x
+        self.y = y
 
 
 # Modes the tick loop actually drives. `cue` and `wake` are legal *transiently*
