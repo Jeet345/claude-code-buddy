@@ -1,6 +1,12 @@
 # Phase 5 — Act without switching to the terminal
 
-**Status:** not started. **Do not start building — start with the spike below.**
+**Status:** **5a built** 2026-10-13, on the mod rather than a blocking hook. The spike's
+questions were answered by the mod API itself: `tool.check` returns a verdict (`allow` /
+`ask` / `deny`); a hook's own budget is 10s but time spent in a `$` call (the socket
+request) does not count; a hook that fails or overruns is skipped, which leaves the
+engine's verdict - fail open by construction. The permission dialog cannot be pressed by
+a plugin, so the buddy *holds* the verdict and returns `ask` (the dialog) on every path
+that is not a click. Off by default; `/buddy approve on`. 5b-5e not started.
 **Depends on:** phases 1, 3, 4
 **Delivers:** the buddy stops being a display and becomes an input
 **Data needed:** hook *output*, which is a different contract from everything before it.

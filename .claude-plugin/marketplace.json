@@ -1,0 +1,13 @@
+{
+  "name": "deck-guy",
+  "description": "The deck guy: a desktop creature that shows what Claude Code is doing and lets you answer its prompts.",
+  "owner": {
+    "name": "jeet-mendapara-us"
+  },
+  "plugins": [
+    {
+      "name": "deck-buddy",
+      "source": "./mod/deck-buddy"
+    }
+  ]
+}

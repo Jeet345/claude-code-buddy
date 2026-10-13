@@ -25,8 +25,10 @@ import os
 import random
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import gi
 
@@ -42,11 +44,15 @@ import cairo  # noqa: E402
 # the daemon and preview.png can never disagree about who wears what.
 from sprites import COSTUMES, TOOL_COSTUME  # noqa: E402
 
+import layout  # noqa: E402
 import prices  # noqa: E402
 import windows  # noqa: E402
 from alerts import Alerts  # noqa: E402
-from bubble import HIGH, WARN, Bubble, Meter, Panel, bar_colour, place  # noqa: E402
-from sessions import ROOT as SESSIONS_ROOT, SessionStore, clock  # noqa: E402
+from bridge import Approvals, Bridge  # noqa: E402
+from bubble import (HIGH, WARN, BAR_HIGH, BAR_OK, Bubble, Card, Meter, Panel,  # noqa: E402
+                    bar_colour, place)
+from vector_motion import Spring  # noqa: E402
+from sessions import ROOT as SESSIONS_ROOT, SessionStore, clock, describe, elide  # noqa: E402
 
 def _unix_signal_add():
     """Whichever of the three spellings this PyGObject actually has.
@@ -107,6 +113,36 @@ STALE_SECS = 45       # no hook this long while "working" means the session is o
 BUBBLE_GAP = 10       # px between the top of his head and the bubble's tail
 BUBBLE_LINGER = 2.5   # secs the last step stays readable after it ends
 BUBBLE_FADE = 0.6     # secs it takes to fade out after that
+SIZES = {"Small": 3, "Medium": 4, "Large": 5, "Huge": 6}   # right-click -> Size
+DEFAULT_SCALE = 4
+WALK_RATE = 2.2       # how quickly avatars and sidekicks close on their spot, 1/s
+AVATAR_DIV = 2        # other sessions stand beside him at half his size
+SIDEKICK_DIV = 3      # subagents trail behind him, smaller still
+FOCUS_POLL = 1.0      # secs between "did you go back to the terminal?" checks
+CARD_ARM = 1.0        # secs a new prompt's buttons ignore clicks: it can pop up
+                      # right where you were already clicking something else
+CMD_LINE = 64         # chars per line of a held command on the approval card
+CMD_LINES = 4         # lines of it shown before saying how much is left out
+BADGE = {4: (0.80, 0.58, 0.18), 3: BAR_HIGH, 2: BAR_OK}   # avatar dot by priority
+# The antenna bulb is a status light. None leaves it the body colour, unlit.
+HAT_LIFT = {"build": 5.0, "cook": 8.2}   # grid units of extra stalk per hat costume
+LIGHT_THINK = (0.45, 0.62, 0.95)
+LIGHT_WORK = (0.42, 0.78, 0.45)
+LIGHT_WAIT = (0.97, 0.72, 0.25)
+LIGHT_FAIL = (0.90, 0.32, 0.28)
+
+
+def status_light(s, held=False):
+    """(colour, pulse) for a session's antenna."""
+    if s is None:
+        return None, False
+    if held or s.priority == 4:
+        return LIGHT_WAIT, True
+    if s.priority == 3:
+        return LIGHT_FAIL, False
+    if s.state == "working":
+        return (LIGHT_THINK if s.phase == "thinking" else LIGHT_WORK), False
+    return None, False
 
 
 
@@ -273,6 +309,12 @@ class Creature:
             self._cue = self.mode
         self.mode = "cue"
         self._play(anim)
+
+    @property
+    def jump_phase(self):
+        """"crouch" / "air" / "land" mid-jump, else "". The rig reads it for the
+        anticipation squash, the landing dust and the confetti."""
+        return getattr(self, "_jump_phase", "") if self.mode == "jump" else ""
 
     def _start_jump(self, duration):
         """Hop count scales with how long the task took (PLAN.md 11.2)."""
@@ -492,10 +534,12 @@ class Deck(Gtk.Window):
     def __init__(self, args):
         super().__init__(type=Gtk.WindowType.TOPLEVEL)
         self.args = args
-        self.sp = vector.Sheet(args.scale)
+        prefs0 = self._load_prefs()
+        scale = args.scale or int(prefs0.get("scale", DEFAULT_SCALE))
+        self.sp = vector.Sheet(scale if scale in SIZES.values() else DEFAULT_SCALE)
 
         geo = primary_geometry()
-        self.win_w, self.win_h = geo.width, args.height
+        self.win_w, self.win_h = geo.width, self._strip_height()
         self.ground_y = self.win_h - GROUND_MARGIN
 
         home = self._load_home(geo.width // 2)
@@ -551,8 +595,8 @@ class Deck(Gtk.Window):
 
         # The readout. Both sit above the tallest hop rather than above his head,
         # so a jump does not fling the bubble around or land him on top of it.
-        self.bubble = Bubble(args.scale)
-        self.panel = Panel(args.scale)
+        self.bubble = Bubble(self.sp.scale)
+        self.panel = Panel(self.sp.scale)
         self._bubble_until = 0.0
         self._hover = False
         prefs = self._load_prefs()
@@ -582,6 +626,46 @@ class Deck(Gtk.Window):
         print(f"alerts: toast={self.alerts.toast} sound={self.alerts.sound} "
               f"first={self.alerts.first}s repeat={self.alerts.repeat}s", flush=True)
 
+        # Phase 5: answering permission prompts from here. The card replaces the
+        # bubble while a prompt is held; the bridge is the socket the deck-buddy
+        # mod asks over. Off by default - it is the one feature that acts.
+        self.card = Card(self.sp.scale)
+        self._card_rect = None
+        self._card_hot = ""
+        self._press_btn = ""
+        self._card_since = 0.0
+        self._focus_check = 0.0
+        self.approvals = Approvals(
+            enabled=bool(prefs.get("approve", False)),
+            focused=self._focused_threadsafe,
+            on_change=lambda: GLib.idle_add(self._approvals_changed))
+        self.bridge = None
+        if not args.demo:
+            self.bridge = Bridge(SESSIONS_ROOT / "buddy.sock", self.approvals,
+                                 prefs=self._bridge_prefs, cue=self._bridge_cue).start()
+        print(f"approve from buddy: {self.approvals.enabled}", flush=True)
+
+        # Phase 4: every other live session stands beside him; the featured
+        # session's subagents trail behind. One Rig each, keyed by id.
+        self._avatars = {}
+        self._sidekicks = {}
+        self._avatar_rects = []       # [(session_id, rect)]
+        self._sidekick_rects = []     # [(agent_id, rect)]
+        self._more = []               # [((x, y), n)] "+n" labels
+        self._hover_sid = None        # an avatar under the pointer
+        self._pointer = None          # (x, y, when) of the last motion over him
+        # Readouts pop in: a spring from slightly small to rest, with a touch
+        # of overshoot. Keyed on which readout is up, so a new card pops and a
+        # ticking timer does not.
+        self._pop = Spring(1.0, k=260.0, damping=0.55)
+        self._pop_key = None
+        # Costume props spring onto him from nothing, with a wobble of overshoot.
+        self._prop_pop = Spring(1.0, k=220.0, damping=0.42)
+        self._last_costume = None
+        self._last_others = []
+        self._walk = {}               # id -> drawn x, easing toward its layout spot
+        self._leaving = []            # [rig, x, y, w, h, dir, alpha] walking off
+
         # No polling: notify.sh writes a file per session and the store watches
         # the directory. --demo drives him from the script below instead.
         self.store = None
@@ -592,6 +676,32 @@ class Deck(Gtk.Window):
         self._tick_id = GLib.timeout_add(1000 // TICK_HZ, self.tick)
 
     # ------------------------------------------------------------------ state
+    def _strip_height(self):
+        """Tall enough for him, his highest hop, and the tallest readout."""
+        return max(self.args.height or 0, self.sp.h + 340)
+
+    def set_scale(self, scale):
+        """Resize him live, from the Size menu. Remembered in prefs.json."""
+        if scale == self.sp.scale:
+            return
+        self.sp = vector.Sheet(scale)
+        self.creature.sp = self.sp
+        self.bubble, self.panel, self.card = Bubble(scale), Panel(scale), Card(scale)
+        self._avatars.clear()
+        self._sidekicks.clear()
+        self._walk.clear()
+        geo = primary_geometry()
+        self.win_h = self._strip_height()
+        self.ground_y = self.win_h - GROUND_MARGIN
+        self.resize(self.win_w, self.win_h)
+        self.move(geo.x, geo.y + geo.height - self.win_h)
+        self._fence()
+        self.creature.x = self.creature.clamp(self.creature.x)
+        self._last_key = None
+        self.queue_draw()
+        self._save_prefs()
+        print(f"size -> scale {scale}", flush=True)
+
     def _fence(self):
         """Keep his whole body on screen, however wide the strip currently is."""
         half = self.sp.w / 2
@@ -631,7 +741,9 @@ class Deck(Gtk.Window):
             prefs = self._load_prefs()
             prefs.update({"bubble": self.show_bubble,
                           "toast": self.alerts.toast, "sound": self.alerts.sound,
-                          "click_focus": self.click_focus})
+                          "click_focus": self.click_focus,
+                          "approve": self.approvals.enabled,
+                          "scale": self.sp.scale})
             PREFS.write_text(json.dumps(prefs, indent=2))
         except OSError:
             pass
@@ -643,7 +755,8 @@ class Deck(Gtk.Window):
         Called by the file monitor, not on a timer, so there is nothing to do
         here when Claude Code is quiet.
         """
-        s = store.newest()
+        self._sync_approvals(store)
+        s = store.featured()
         if s is None:
             # A slump he has not acknowledged outlives the session that caused
             # it. Resetting him to idle here would erase the only evidence that
@@ -668,6 +781,125 @@ class Deck(Gtk.Window):
             self.creature.set_mode("error")
         elif s.state == "idle":
             self.creature.set_mode("idle")
+
+    def _sync_approvals(self, store):
+        """Release held prompts whose session no longer names them.
+
+        Interrupting the turn in the terminal, or the session dying, leaves the
+        mod's request abandoned; the buddy must stop offering a button for it.
+        """
+        for sess in store.sessions.values():
+            self.approvals.sync(sess.id, (sess.pending or {}).get("id"))
+        now = time.time()
+        for req in self.approvals.held():
+            if req.session_id not in store.sessions and now - req.since > 3.0:
+                self.approvals.answer(req.id, "ask")
+
+    # ---------------------------------------------------------------- approvals
+    def _focused(self, session_id):
+        s = self.store.sessions.get(session_id) if self.store else None
+        if s is None:
+            return None
+        return windows.focused(s.pids, s.project)
+
+    def _focused_threadsafe(self, session_id):
+        """`_focused`, from the bridge's thread. GDK is main-loop only."""
+        box, done = [], threading.Event()
+
+        def probe():
+            try:
+                box.append(self._focused(session_id))
+            except Exception:
+                box.append(None)
+            finally:
+                done.set()
+            return False
+
+        GLib.idle_add(probe)
+        return box[0] if done.wait(1.5) and box else None
+
+    def _approvals_changed(self):
+        req = self.approvals.current()
+        key = req.id if req else None
+        if key and key != getattr(self, "_approval_key", None):
+            self._card_since = time.time()
+            print(f"holding prompt {req!r}", flush=True)
+            c = self.creature
+            c.last_activity = time.time()
+            if c.mode == "sleep":
+                c.set_mode("idle")
+            c.cue("wave")
+        self._approval_key = key
+        return False
+
+    def _bridge_prefs(self, d):
+        if isinstance(d.get("approve"), bool):
+            self.approvals.enabled = d["approve"]
+            if not self.approvals.enabled:
+                self.approvals.release()
+            GLib.idle_add(lambda: (self._save_prefs(), False)[1])
+            print(f"approve from buddy: {self.approvals.enabled} (by /buddy)", flush=True)
+        return {"approve": self.approvals.enabled}
+
+    def _bridge_cue(self, d):
+        cue = d.get("cue")
+        if cue not in ("wave", "jump"):
+            return {"ok": False}
+        GLib.idle_add(lambda: (self.creature.cue("wave") if cue == "wave"
+                               else self.creature.set_mode("jump", 12), False)[1])
+        return {"ok": True}
+
+    def answer_card(self, bid):
+        req = self.approvals.current()
+        if req is None:
+            return
+        sess = self.store.sessions.get(req.session_id) if self.store else None
+        if bid == "remember":
+            self.approvals.answer(req.id, "allow", remember=True)
+            self.say("allowed - again for 10 min")
+        elif bid in ("allow", "deny"):
+            self.approvals.answer(req.id, bid)
+            self.say("allowed" if bid == "allow" else "denied")
+        else:
+            self.approvals.answer(req.id, "ask")
+            if sess is not None:
+                self.focus_terminal(sess)
+        print(f"answered {req!r}: {bid}", flush=True)
+        self.creature.cue("wave")
+
+    def card_content(self, req, now):
+        sess = self.store.sessions.get(req.session_id) if self.store else None
+        cwd = sess.cwd if sess else ""
+        project = (sess.project if sess else "") or "session"
+        who = f"{project} · subagent" if req.agent else project
+        cmd = req.input.get("command", "")
+        if cmd:
+            # The exact command, not the shortened step label: this is what you
+            # are approving, so every character of it is shown or accounted for.
+            text = " ".join(cmd.split())
+            lines = [text[i:i + CMD_LINE] for i in range(0, len(text), CMD_LINE)]
+            shown = lines[:CMD_LINES]
+            if len(lines) > CMD_LINES:
+                left = len(text) - CMD_LINE * CMD_LINES
+                shown.append(f"… {left} more chars - read it all In terminal")
+            title = req.tool
+            body = shown
+        else:
+            title = elide(f"{req.tool}  {describe(req.tool, req.input, cwd)}".strip(), 70)
+            path = req.input.get("file_path", "")
+            body = [elide(path, 70)] if path and path != describe(req.tool, req.input, cwd) else []
+        reason = req.reason or "needs your permission"
+        lines = body + [elide(f"{who} · {reason}", 70)]
+        waiting = len(self.approvals.held()) - 1
+        if waiting > 0:
+            lines.append(f"+{waiting} more waiting")
+        buttons = [("allow", "Allow"), ("remember", "Allow 10 min"),
+                   ("deny", "Deny"), ("ask", "In terminal")]
+        if req.risk:
+            # Risky: say what is risky first, and do not offer a standing pass.
+            title = f"⚠ {req.risk}  ·  {title}"
+            buttons = [b for b in buttons if b[0] != "remember"]
+        return title, lines, buttons
 
     def on_stale(self):
         """A working session stopped answering. Say so rather than shrugging."""
@@ -714,7 +946,17 @@ class Deck(Gtk.Window):
         fades a couple of seconds after it ends, so an idle desktop has nothing
         on it but him.
         """
-        s = self.store.newest() if self.store else None
+        req = self.approvals.current()
+        if req is not None:
+            title, lines, buttons = self.card_content(req, now)
+            self.card.set(title, lines, buttons, timer=clock(now - req.since),
+                          hot=self._card_hot, danger=bool(req.risk))
+        else:
+            self.card.set("")
+
+        featured = self.store.featured() if self.store else None
+        hovered = self.store.sessions.get(self._hover_sid) if (self.store and self._hover_sid) else None
+        s = hovered or featured
         alert = self.alerts.current()
         say, say_until = self._say
         if not self.show_bubble:
@@ -734,17 +976,17 @@ class Deck(Gtk.Window):
             # room while you are doing something else.
             self.bubble.set(alert.message, clock(alert.waited(now)))
             self._bubble_until = now + BUBBLE_LINGER
-        elif s and s.state == "working" and s.label:
-            self.bubble.set(s.label, clock(s.elapsed(now)))
+        elif featured and featured.state == "working" and featured.label:
+            self.bubble.set(featured.label, clock(featured.elapsed(now)))
             self._bubble_until = now + BUBBLE_LINGER
-        elif s and s.state == "jump":
+        elif featured and featured.state == "jump":
             self.bubble.set("done")
             self._bubble_until = min(self._bubble_until, now + BUBBLE_LINGER)
 
         if now > self._bubble_until + BUBBLE_FADE:
             self.bubble.set("")
 
-        if not self._hover:
+        if not (self._hover or hovered):
             self.panel.set([])
         elif s:
             rows = [("project", s.project or "-"),
@@ -753,7 +995,13 @@ class Deck(Gtk.Window):
                     ("elapsed", clock(s.elapsed(now)))]
             if s.permission_mode:
                 rows.insert(1, ("mode", s.permission_mode))
-            self.panel.set(rows + self.alert_rows(alert, now)
+            if s.agents:
+                first = s.agents[0]
+                what = first.get("description") or first.get("type") or "subagent"
+                rows.append(("subagents", elide(f"{len(s.agents)} · {what}", 40)))
+            if len(self.store.sessions) > 1:
+                rows.append(("sessions", f"{len(self.store.sessions)} live"))
+            self.panel.set(rows + self.alert_rows(alert if s is featured else None, now)
                            + self.metric_rows(s.metrics))
         elif self.args.demo:
             self.panel.set([("project", "deck-guy"), ("mode", "demo"),
@@ -791,6 +1039,14 @@ class Deck(Gtk.Window):
 
         pct = f"{m.fill * 100:.0f}%"
         approx = "~" if m.window_approx else ""
+        if getattr(m, "live", False):
+            # Measured by the engine: exact window, Claude Code's own cost.
+            rows = [("context", f"{pct}  {prices.tokens(m.context)} / "
+                                f"{approx}{prices.tokens(m.window)}", m.window_approx),
+                    Meter(m.fill, dim=m.window_approx),
+                    ("cost", prices.money(m.cost)),
+                    ("model", f"{m.model or 'unknown'} {m.effort}".strip(), not m.model)]
+            return rows
         burn = f"{prices.tokens(m.input)} in · {prices.tokens(m.output)} out"
         rows = [("context", f"{pct}  {prices.tokens(m.context)} / "
                             f"{approx}{prices.tokens(m.window)}", m.window_approx),
@@ -808,7 +1064,7 @@ class Deck(Gtk.Window):
         Everything else in phase 2 stays behind a hover. This does not, because
         by the time you think to check, a compaction has already happened.
         """
-        s = self.store.newest() if self.store else None
+        s = self.store.featured() if self.store else None
         m = getattr(s, "metrics", None) if s else None
         if m is None or not m.ok or m.window_approx:
             return 0            # never alarm on a number we are guessing at
@@ -822,7 +1078,7 @@ class Deck(Gtk.Window):
         level = self.context_level()
         if not level:
             return
-        px = self.args.scale
+        px = self.sp.scale
         # His sheet cell is 120x96 but the body inside it is 90x63, and `bbox`
         # returns the cell. Anchoring to the cell put the badge 33px above his
         # head in empty sky, looking like an unrelated notification - the same
@@ -881,12 +1137,27 @@ class Deck(Gtk.Window):
     def readout_rect(self, now):
         """Screen rect of whatever readout is showing, or None. Drives both the
         damage rectangle and the input shape, so the two cannot disagree."""
-        widget = self.panel if self.panel.visible else self.bubble
+        widget = self.readout_widget()
         if not widget.visible or (widget is self.bubble and self.readout_alpha(now) <= 0):
             return None
         w, h = widget.size()
-        x, y = place(self.creature.x, self.readout_y, w, h, self.win_w)
+        x, y = place(self.readout_cx, self.readout_y, w, h, self.win_w)
         return (x, y, w, h)
+
+    def readout_widget(self):
+        """Card over panel over bubble: a question for you outranks a hover."""
+        if self.card.visible:
+            return self.card
+        return self.panel if self.panel.visible else self.bubble
+
+    @property
+    def readout_cx(self):
+        """Above whichever body the readout is about: an avatar when hovering one."""
+        if self._hover_sid and not self.card.visible:
+            for sid, (x, _y, w, _h) in self._avatar_rects:
+                if sid == self._hover_sid:
+                    return x + w / 2
+        return self.creature.x
 
     DEMO = [
         ("idle", 4.0), ("patrol", 6.0), ("wave", 2.0),
@@ -950,7 +1221,11 @@ class Deck(Gtk.Window):
         if self.args.demo:
             self.run_demo(now)
         self.creature.update(dt, now)
+        self.update_face(now)
         self.rig.update(dt, self.creature)
+        self.update_others(dt)
+        self.poll_focus(now)
+        self.update_pop(dt)
         # Escalation is a clock, not an event, so it has to be looked at every
         # tick. There is no new timer: this is the one that was already running.
         self.on_alerts(now)
@@ -974,8 +1249,9 @@ class Deck(Gtk.Window):
             phase = 0
         # The readout carries a ticking timer, so it goes in the key too - otherwise
         # the elapsed count would only redraw when he happened to move.
-        readout = (self.bubble.text, self.bubble.timer, self.panel.key(),
-                   round(self.readout_alpha(now), 2), self.context_level())
+        readout = (self.bubble.text, self.bubble.timer, self.panel.key(), self.card.key(),
+                   round(self.readout_alpha(now), 2), self.context_level(),
+                   round(self._pop.x, 3), round(self._prop_pop.x, 3))
         rect = self.readout_rect(now)
         # The sprite body only changed when `frame` did, so the frame index was
         # a sound repaint key. A spring-driven body changes every tick, so the
@@ -983,18 +1259,25 @@ class Deck(Gtk.Window):
         # effectively still and the old economy is worth keeping.
         self._seq = getattr(self, "_seq", 0) + 1
         moving = 0 if c.mode == "sleep" else self._seq
-        key = (c.anim, c.frame, c.facing, bbox, phase, readout, moving)
+        others = self.other_rects()
+        key = (c.anim, c.frame, c.facing, bbox, phase, readout, moving, tuple(others))
         if key != getattr(self, "_last_key", None):
             self._last_key = key
             pad = 90  # room for props, sparkles and the zzz trail
             for b in filter(None, (self._last_bbox, bbox)):
                 self.queue_draw_area(b[0] - pad, b[1] - pad, b[2] + pad * 2, b[3] + pad * 2)
             for r in filter(None, (self._last_readout, rect)):
-                self.queue_draw_area(r[0] - 2, r[1] - 2, r[2] + 4, r[3] + 4)
-            if bbox != self._last_bbox or rect != self._last_readout:
-                self._update_input_shape(bbox, rect)
+                # padded for the pop's overshoot, which draws a little outside
+                padx, pady = int(r[2] * 0.06) + 4, int(r[3] * 0.12) + 4
+                self.queue_draw_area(r[0] - padx, r[1] - pady, r[2] + padx * 2, r[3] + pady + 4)
+            for r in set(self._last_others) | set(others):
+                self.queue_draw_area(r[0] - 30, r[1] - 16, r[2] + 60, r[3] + 20)
+            if (bbox != self._last_bbox or rect != self._last_readout
+                    or others != self._last_others):
+                self._update_input_shape(bbox, rect, others)
             self._last_bbox = bbox
             self._last_readout = rect
+            self._last_others = others
 
         # Tick only as fast as the current posture needs. Motion wants 30Hz; standing
         # still only has to outrun the animation's own fps, and sleeping barely that.
@@ -1005,7 +1288,222 @@ class Deck(Gtk.Window):
             return False
         return True
 
-    def _update_input_shape(self, bbox, readout=None):
+    def update_pop(self, dt):
+        costume = self.creature.costume if self.creature.mode == "working" else None
+        if costume != self._last_costume:
+            if costume:
+                self._prop_pop.snap(0.15)
+                self._prop_pop.target = 1.0
+            self._last_costume = costume
+        self._prop_pop.step(dt)
+        widget = self.readout_widget()
+        key = None
+        if widget.visible:
+            key = (type(widget).__name__,
+                   self.approvals.current().id if widget is self.card and self.approvals.current() else
+                   (self._hover_sid if widget is self.panel else bool(self.bubble.text)))
+        if key != self._pop_key:
+            if key is not None and (self._pop_key is None or key[0] != self._pop_key[0]
+                                    or widget is self.card):
+                self._pop.snap(0.86)
+                self._pop.target = 1.0
+            self._pop_key = key
+        self._pop.step(dt)
+
+    # ------------------------------------------------------------------ face
+    def update_face(self, now):
+        """What his face says beyond the posture: the session's phase, a
+        question waiting on you, and where your pointer is.
+
+        Only while he is not mid-gesture: a jump, a wave or a slump already
+        has a face of its own and is over in a second or two.
+        """
+        c = self.creature
+        expression = None
+        s = self.store.featured() if self.store else None
+        if c.anim in ("idle", "working", "patrol") or c.anim in COSTUMES:
+            if self.approvals.current() is not None or (s and s.priority == 4):
+                expression = "worried"
+            elif s and s.state == "working" and s.phase == "thinking":
+                expression = "thinking"
+            elif s and s.state == "working" and s.phase == "responding":
+                expression = "writing"
+        c.expression = expression
+        held = self.approvals.current() is not None
+        self.rig.light, self.rig.light_pulse = status_light(s, held)
+        # hats sit on top of his head; grow the stalk so the light pokes out
+        wearing = c.costume if c.mode == "working" else None
+        self.rig.antenna_lift = HAT_LIFT.get(wearing, 0.0)
+        if c.mode == "sleep":
+            self.rig.light = None
+
+        face = self.rig.face
+        if self.card.visible:
+            face.look(0.0, -1.0, hold=0.3)          # up at the question
+        elif self._pointer and now - self._pointer[2] < 1.5:
+            px, py, _ = self._pointer
+            bx, by, bw, bh = c.bbox(self.ground_y)
+            dx = (px - (bx + bw / 2)) / max(1.0, bw * 1.5) * c.facing
+            dy = (py - (by + bh * 0.45)) / max(1.0, bh * 1.5)
+            face.look(dx, dy, hold=0.3)
+
+    # ------------------------------------------------------------- the others
+    @staticmethod
+    def _anim_for(s):
+        if s.state == "working":
+            return TOOL_COSTUME.get(s.tool) or "idle"
+        if s.state == "error":
+            return "error"
+        return "idle"
+
+    def update_others(self, dt):
+        """Lay out and step the avatars and sidekicks. Cheap: a few rects."""
+        if not self.store:
+            return
+        c = self.creature
+        ranked = self.store.ranked()
+        featured, others = (ranked[0], ranked[1:]) if ranked else (None, [])
+        aw, ah = self.sp.w // AVATAR_DIV, self.sp.h // AVATAR_DIV
+        row = layout.avatar_row(c.x, self.sp.w, self.ground_y, (aw, ah),
+                                len(others), self.win_w)
+        ids = [s.id for s in others[:len(row.rects)]]
+        if row.side < 0:
+            ids.reverse()
+        self._avatar_rects = list(zip(ids, row.rects))
+        self._more = [(row.more_at, row.more)] if row.more else []
+
+        agents = featured.agents if featured else []
+        kw, kh = self.sp.w // SIDEKICK_DIV, self.sp.h // SIDEKICK_DIV
+        krow = layout.sidekick_row(c.x, self.sp.w, self.ground_y, (kw, kh),
+                                   len(agents), self.win_w, avoid=row.side if others else 0)
+        kids = [str(a.get("id", i)) for i, a in enumerate(agents[:len(krow.rects)])]
+        if krow.side < 0:
+            kids.reverse()
+        self._sidekick_rects = list(zip(kids, krow.rects))
+        if krow.more:
+            self._more.append((krow.more_at, krow.more))
+
+        live_ids = {sid for sid, _ in self._avatar_rects}
+        for sid in list(self._avatars):
+            if sid not in live_ids:
+                # a session that ended walks off the edge rather than vanishing
+                rig = self._avatars.pop(sid)
+                x = self._walk.pop(sid, None)
+                if x is not None:
+                    _y, w, h = self.ground_y - self.sp.h // AVATAR_DIV, self.sp.w // AVATAR_DIV, self.sp.h // AVATAR_DIV
+                    away = 1 if x > c.x else -1
+                    self._leaving.append([rig, x, _y, w, h, away, 1.0])
+        for sid, (tx, _y, w, _h) in self._avatar_rects:
+            rig = self._avatars.get(sid)
+            if rig is None:
+                rig = self._avatars[sid] = vector.Rig()
+                # a new session walks in from beyond the far end of the row
+                side = 1 if tx > c.x else -1
+                self._walk[sid] = tx + side * (w * 2.5)
+            s = self.store.sessions.get(sid)
+            moving = self._ease_walk(sid, tx, dt)
+            anim = "patrol" if moving else (self._anim_for(s) if s else "idle")
+            expression = ("worried" if s and s.priority == 4 else
+                          "thinking" if s and s.state == "working" and s.phase == "thinking" else None)
+            rig.update(dt, SimpleNamespace(anim=anim, y_off=0.0, expression=expression,
+                                           x=self._walk[sid], facing=1))
+            rig.light, rig.light_pulse = status_light(s)
+        kid_ids = {k for k, _ in self._sidekick_rects}
+        for k in list(self._sidekicks):
+            if k not in kid_ids:
+                self._sidekicks.pop(k)
+                self._walk.pop("k:" + k, None)
+        for k, (tx, _y, w, _h) in self._sidekick_rects:
+            rig = self._sidekicks.get(k)
+            if rig is None:
+                rig = self._sidekicks[k] = vector.Rig()
+                self._walk["k:" + k] = c.x            # hatch from him, then trot off
+            # sidekicks lag: ducklings, not a formation
+            moving = self._ease_walk("k:" + k, tx, dt, rate=WALK_RATE * 0.55)
+            rig.update(dt, SimpleNamespace(anim="patrol" if moving else "read", y_off=0.0,
+                                           x=self._walk["k:" + k], facing=1))
+        alive = []
+        for item in self._leaving:
+            rig, x, y, w, h, away, alpha = item
+            item[1] = x + away * 90 * dt
+            item[6] = alpha - dt * 1.4
+            if item[6] > 0 and -w < item[1] < self.win_w:
+                rig.update(dt, SimpleNamespace(anim="patrol", y_off=0.0, x=item[1], facing=away))
+                alive.append(item)
+        self._leaving = alive
+        if self._hover_sid and self._hover_sid not in live_ids:
+            self._hover_sid = None
+
+    def _ease_walk(self, key, target, dt, rate=WALK_RATE):
+        """Move a drawn x toward its spot; True while it is still on its way."""
+        x = self._walk.get(key, target)
+        x += (target - x) * min(1.0, dt * rate)
+        self._walk[key] = x
+        return abs(target - x) > 2.0
+
+    def drawn_rect(self, key, rect):
+        x = self._walk.get(key)
+        return rect if x is None else (int(x), rect[1], rect[2], rect[3])
+
+    def other_rects(self):
+        rects = [self.drawn_rect(sid, r) for sid, r in self._avatar_rects]
+        rects += [self.drawn_rect("k:" + k, r) for k, r in self._sidekick_rects]
+        rects += [(int(i[1]), i[2], i[3], i[4]) for i in self._leaving]
+        return rects
+
+    def poll_focus(self, now):
+        """Went back to the terminal while a prompt was held? Hand it over."""
+        req = self.approvals.current()
+        if req is None or now - self._focus_check < FOCUS_POLL:
+            return
+        self._focus_check = now
+        if self._focused(req.session_id) is True:
+            n = self.approvals.release(req.session_id)
+            if n:
+                print(f"released {n} prompt(s): you went back to the terminal", flush=True)
+
+    def draw_others(self, cr, now):
+        if not self.store:
+            return
+        c = self.creature
+        for rig, x, y, w, h, away, alpha in self._leaving:
+            cr.push_group()
+            rig.draw(cr, x, y, w, h, away)
+            cr.pop_group_to_source()
+            cr.paint_with_alpha(max(0.0, alpha))
+        for sid, rect in self._avatar_rects:
+            x, y, w, h = self.drawn_rect(sid, rect)
+            rig = self._avatars.get(sid)
+            s = self.store.sessions.get(sid)
+            if rig is None or s is None:
+                continue
+            if abs(x - rect[0]) > 2:                  # walking: face the way he goes
+                facing = 1 if rect[0] > x else -1
+            else:
+                facing = -1 if x + w / 2 < c.x else 1  # standing: look at him
+            rig.draw(cr, x, y, w, h, facing)
+            if sid == self._hover_sid:
+                cr.set_source_rgba(0.494, 0.227, 0.141, 0.8)
+                cr.rectangle(x + 4, y + h + 2, w - 8, 2)
+                cr.fill()
+        for _k, rect in self._sidekick_rects:
+            x, y, w, h = self.drawn_rect("k:" + _k, rect)
+            rig = self._sidekicks.get(_k)
+            if rig is not None:
+                if abs(x - rect[0]) > 2:
+                    facing = 1 if rect[0] > x else -1
+                else:
+                    facing = 1 if x < c.x else -1
+                rig.draw(cr, x, y, w, h, facing)
+        cr.select_font_face("DejaVu Sans Mono")
+        cr.set_font_size(11)
+        for at, n in self._more:
+            if at:
+                cr.set_source_rgba(0.16, 0.11, 0.09, 0.85)
+                cr.move_to(*at)
+                cr.show_text(f"+{n}")
+
+    def _update_input_shape(self, bbox, readout=None, others=()):
         """Only the creature and his readout catch clicks; the rest of the strip
         stays click-through. Anything drawn that is not in here is unhoverable,
         so both rectangles come from the same place the draw does."""
@@ -1019,6 +1517,8 @@ class Deck(Gtk.Window):
         if readout:
             rx, ry, rw, rh = readout
             region.union(cairo.RectangleInt(rx, ry, rw, rh))
+        for ox, oy, ow, oh in others:
+            region.union(cairo.RectangleInt(ox, oy, ow, oh))
         win.input_shape_combine_region(region, 0, 0)
 
     # ------------------------------------------------------------------- draw
@@ -1043,13 +1543,28 @@ class Deck(Gtk.Window):
                              self.ground_y - sh * s, s)
 
         specs = c.attachment_specs()
+        pop = max(0.0, self._prop_pop.x)
+
+        def prop(key, ax, ay, rot):
+            if pop >= 0.999:
+                vector.draw_prop(cr, key, x + ax * s, y + ay * s, s, rotate=rot)
+                return
+            pw, ph = vector.prop_size(key)
+            cx, cy = x + (ax + pw / 2) * s, y + (ay + ph / 2) * s
+            cr.save()
+            cr.translate(cx, cy)
+            cr.scale(pop, pop)
+            cr.translate(-cx, -cy)
+            vector.draw_prop(cr, key, x + ax * s, y + ay * s, s, rotate=rot)
+            cr.restore()
+
         for key, ax, ay, z, rot in specs:
             if z == "back":
-                vector.draw_prop(cr, key, x + ax * s, y + ay * s, s, rotate=rot)
+                prop(key, ax, ay, rot)
         self.rig.draw(cr, x, y, w, h, c.facing)
         for key, ax, ay, z, rot in specs:
             if z != "back":
-                vector.draw_prop(cr, key, x + ax * s, y + ay * s, s, rotate=rot)
+                prop(key, ax, ay, rot)
 
         if c.sparkle and c.y_off > 8:
             key = vector.prop_key("sparkle", int(now * 12))
@@ -1066,15 +1581,19 @@ class Deck(Gtk.Window):
 
         self.draw_context_pip(cr, c)
         self.draw_alert_badge(cr, c, now)
+        self.draw_others(cr, now)
 
         # Readout last, on top of everything. The panel replaces the bubble rather
         # than stacking under it: the bubble's line is already the panel's `step`
         # row, and stacking would need a strip half again as tall.
-        if self.panel.visible:
-            self.panel.draw(cr, c.x, self.readout_y, self.win_w)
+        pop = self._pop.x
+        if self.card.visible:
+            self._card_rect = self.card.draw(cr, c.x, self.readout_y, self.win_w, scale=pop)
+        elif self.panel.visible:
+            self.panel.draw(cr, self.readout_cx, self.readout_y, self.win_w, scale=pop)
         else:
             self.bubble.draw(cr, c.x, self.readout_y, self.win_w,
-                             self.readout_alpha(now))
+                             self.readout_alpha(now), scale=pop)
 
         if c.mode == "sleep":
             phase = now % 3.0
@@ -1106,7 +1625,7 @@ class Deck(Gtk.Window):
         otherwise gives you a gesture that works four times and silently does
         nothing the fifth, which is worse than one that never worked.
         """
-        s = session or (self.store.newest() if self.store else None)
+        s = session or (self.store.featured() if self.store else None)
         if s is None:
             self.say("no session to jump to")
             return windows.Result(False, "no session")
@@ -1134,7 +1653,33 @@ class Deck(Gtk.Window):
             print(f"  {r.hint}", flush=True)
         return r
 
+    def _card_button(self, x, y):
+        if not self.card.visible:
+            return ""
+        w, h = self.card.size()
+        origin = place(self.creature.x, self.readout_y, w, h, self.win_w)
+        for bid, (bx, by, bw, bh) in self.card.buttons_at(origin).items():
+            if bx <= x < bx + bw and by <= y < by + bh:
+                return bid
+        return ""
+
+    def _avatar_at(self, x, y):
+        i = layout.hit([self.drawn_rect(sid, r) for sid, r in self._avatar_rects], x, y)
+        return self._avatar_rects[i][0] if i >= 0 else None
+
     def on_press(self, _w, ev):
+        if ev.button == 1 and self._card_button(ev.x, ev.y):
+            if time.time() - self._card_since < CARD_ARM:
+                print(f"ignored a click on the card at ({ev.x:.0f},{ev.y:.0f}): "
+                      f"it appeared under the pointer {time.time() - self._card_since:.2f}s ago",
+                      flush=True)
+                return True
+            self._press_btn = self._card_button(ev.x, ev.y)
+            print(f"card press {self._press_btn} at ({ev.x:.0f},{ev.y:.0f})", flush=True)
+            return True
+        if ev.button == 1 and self._avatar_at(ev.x, ev.y):
+            self._press_btn = "avatar:" + self._avatar_at(ev.x, ev.y)
+            return True
         if ev.button == 1:
             self._drag = (ev.x_root, self.creature.x)
             self._dragged = False
@@ -1154,15 +1699,32 @@ class Deck(Gtk.Window):
             self.creature.home_x = self.creature.x
             return True
         # Motion only reaches us inside the input shape, so being here at all means
-        # the pointer is on him or on the readout.
-        self._hover = True
+        # the pointer is on him, the readout, or another session's avatar.
+        self._pointer = (ev.x, ev.y, time.time())
+        self._card_hot = self._card_button(ev.x, ev.y)
+        self._hover_sid = self._avatar_at(ev.x, ev.y)
+        self._hover = self._hover_sid is None
         return True
 
     def on_leave(self, _w, _ev):
         self._hover = False
+        self._hover_sid = None
+        self._card_hot = ""
         return True
 
     def on_release(self, _w, ev):
+        pressed, self._press_btn = self._press_btn, ""
+        if pressed.startswith("avatar:"):
+            sid = pressed.split(":", 1)[1]
+            if self._avatar_at(ev.x, ev.y) == sid and self.store:
+                s = self.store.sessions.get(sid)
+                if s is not None:
+                    self.focus_terminal(s)
+            return True
+        if pressed:
+            if self._card_button(ev.x, ev.y) == pressed:
+                self.answer_card(pressed)
+            return True
         if self._drag:
             dragged, self._drag = self._dragged, None
             if dragged:
@@ -1194,6 +1756,13 @@ class Deck(Gtk.Window):
         self.click_focus = item.get_active()
         self._save_prefs()
         print(f"click jumps to terminal: {self.click_focus}", flush=True)
+
+    def on_toggle_approve(self, item):
+        self.approvals.enabled = item.get_active()
+        if not self.approvals.enabled:
+            self.approvals.release()
+        self._save_prefs()
+        print(f"approve from buddy: {self.approvals.enabled}", flush=True)
 
     def on_toggle_toast(self, item):
         self.alerts.toast = item.get_active()
@@ -1236,6 +1805,23 @@ class Deck(Gtk.Window):
         jump.set_active(self.click_focus)
         jump.connect("toggled", self.on_toggle_click_focus)
         m.append(jump)
+        approve = Gtk.CheckMenuItem(label="Answer prompts from buddy")
+        approve.set_active(self.approvals.enabled)
+        approve.set_sensitive(self.bridge is not None)
+        approve.connect("toggled", self.on_toggle_approve)
+        m.append(approve)
+
+        size_item = Gtk.MenuItem(label="Size")
+        sizes = Gtk.Menu()
+        group = None
+        for label, scale in SIZES.items():
+            item = Gtk.RadioMenuItem.new_with_label_from_widget(group, label)
+            group = item
+            item.set_active(scale == self.sp.scale)
+            item.connect("toggled", lambda it, sc=scale: it.get_active() and self.set_scale(sc))
+            sizes.append(item)
+        size_item.set_submenu(sizes)
+        m.append(size_item)
         m.append(Gtk.SeparatorMenuItem())
 
         items = [
@@ -1325,13 +1911,17 @@ def single_instance():
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--demo", action="store_true", help="cycle every state, ignore hooks")
-    p.add_argument("--scale", type=int, default=3, help="pixel size (default 3)")
+    # 4 since the face got expressions: at 3 a mouth is under two pixels thick
+    # and every mood reads as the same blank stare.
+    p.add_argument("--scale", type=int, default=None,
+                   help="pixel size (default: the Size menu's choice, else 4)")
     # 400 is the sum of the parts at scale 3: body (96), the tallest hop (46), the
     # gap above his head (10), and the hover panel that replaces the bubble (198
     # at the ten rows phase 2 brought), plus slack. Everything above him is
     # transparent and click-through, so spare height costs nothing but window
     # size, and the panel clamps if it ever wants more than there is.
-    p.add_argument("--height", type=int, default=400, help="strip height in px")
+    p.add_argument("--height", type=int, default=None,
+                   help="strip height in px (default: fits his size)")
     p.add_argument("--idle-secs", type=int, default=300, help="seconds before he sleeps")
     p.add_argument("--no-shape", action="store_true", help="debug: skip click-through")
     p.add_argument("--no-log", action="store_true", help="keep output on the terminal")
@@ -1346,8 +1936,10 @@ def main():
         start_log()
 
     install_quit_signals()
-    Deck(args)
+    deck = Deck(args)
     Gtk.main()
+    if deck.bridge is not None:
+        deck.bridge.stop()             # releases held prompts to their terminals
     PIDFILE.unlink(missing_ok=True)
     return 0
 

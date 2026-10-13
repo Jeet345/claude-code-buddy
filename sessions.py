@@ -21,7 +21,7 @@ from pathlib import Path
 
 from gi.repository import Gio, GLib
 
-from transcript import TranscriptReader
+from transcript import Metrics, TranscriptReader
 
 ROOT = Path(os.environ.get("DECK_GUY_HOME") or Path.home() / ".deck-guy")
 SESSIONS_DIR = ROOT / "sessions"
@@ -147,6 +147,17 @@ class Session:
         # Kept as ints and silently dropped if malformed - this feeds a window
         # lookup, not an assertion, and a bad entry simply matches nothing.
         self.pids = _pids(d.get("pids"))
+        # Written by the deck-buddy mod rather than notify.sh. The mod says
+        # what hooks never could - thinking vs writing, live metrics straight
+        # from the engine, the subagents it spawned - so a mod session needs
+        # no transcript tailing at all.
+        self.source = _text(d.get("source")) or "hooks"
+        self.phase = _text(d.get("phase"))
+        self.pending = d.get("pending") if isinstance(d.get("pending"), dict) else None
+        self.agents = [a for a in d.get("agents") or [] if isinstance(a, dict)] \
+            if isinstance(d.get("agents"), list) else []
+        if self.source == "mod":
+            self.metrics = _metrics(d.get("metrics"))
 
     # The hook rewrites the whole file each event, and not every event carries
     # every field, so keep the last non-empty value we were told.
@@ -156,7 +167,8 @@ class Session:
         for field in ("cwd", "transcript_path", "permission_mode"):
             if not getattr(self, field) and getattr(old, field, ""):
                 setattr(self, field, getattr(old, field))
-        self.metrics = getattr(old, "metrics", None)
+        if self.source != "mod":
+            self.metrics = getattr(old, "metrics", None)
         if self.state == "alert":
             # An alert is not a posture. The Notification hook carries no
             # tool_name and no timings, so taking its event at face value would
@@ -179,9 +191,32 @@ class Session:
         """What goes in the bubble: `Bash pytest -q`, `Edit src/auth.py`."""
         if self.state == "jump":
             return "done"
+        # Only a mod session knows its phase; for one, the model's own turn
+        # outranks the tool that finished a moment ago.
+        if self.state == "working" and self.phase == "thinking":
+            return "thinking"
+        if self.state == "working" and self.phase == "responding":
+            return "writing"
         if not self.tool:
             return "thinking" if self.state == "working" else ""
         return elide(f"{self.tool} {self.target}".strip())
+
+    @property
+    def priority(self):
+        """How much this session wants the buddy's attention. Higher wins.
+
+        One rule, written down, so which session he mirrors is predictable:
+        waiting on you > failed > running > just finished > idle.
+        """
+        if self.pending or self.alert in ("permission_prompt", "elicitation_dialog"):
+            return 4
+        if self.state == "error" or self.alert in ("session_failed", "tool_failed"):
+            return 3
+        if self.state == "working":
+            return 2
+        if self.state == "jump":
+            return 1
+        return 0
 
     @property
     def alert_label(self):
@@ -242,6 +277,23 @@ def _text(v):
     `Path(cwd)`. Missing is handled everywhere; wrong-typed was not.
     """
     return v if isinstance(v, str) else ""
+
+
+def _metrics(v):
+    """A mod's metrics dict as a `Metrics`, or None. The engine measured these,
+    so nothing in it is approximate the way a transcript reading can be."""
+    if not isinstance(v, dict):
+        return None
+    m = Metrics()
+    m.model = _text(v.get("model"))
+    m.effort = _text(v.get("effort"))
+    m.context = int(_num(v.get("context")))
+    m.window = int(_num(v.get("window")))
+    m.window_approx = m.window <= 0
+    m.cost = _num(v.get("cost"))
+    m.turns = int(_num(v.get("turns")))
+    m.live = True
+    return m
 
 
 def _pids(v):
@@ -331,7 +383,13 @@ class SessionStore:
             try:
                 data = json.loads(path.read_text())
             except (OSError, ValueError):
-                continue                   # half-written; the next event brings it back
+                # Half-written. The mod cannot rename into place, so this does
+                # happen; keep the last good reading instead of letting the
+                # session blink out of existence for one frame.
+                old = self.sessions.get(path.stem)
+                if old is not None and not old.stale(now, self.stale):
+                    found[old.id] = old
+                continue
             s = Session(data)
             old = self.sessions.get(s.id)
             if old:
@@ -356,7 +414,7 @@ class SessionStore:
         """Tail this session's transcript. No new timer: `reload` already runs
         on every hook event and on the reaper tick, and a poll with nothing new
         is one `getsize` and an early return."""
-        if not self.metrics or not s.transcript_path:
+        if not self.metrics or not s.transcript_path or s.source == "mod":
             return
         reader = self._readers.get(s.id)
         if reader is None or reader.path != s.transcript_path:
@@ -370,7 +428,8 @@ class SessionStore:
         # not only when he does.
         return {k: (s.state, s.tool, s.label, s.ts, s.alert, s.alert_msg,
                     getattr(s.metrics, "context", 0),
-                    round(getattr(s.metrics, "cost", 0.0), 4))
+                    round(getattr(s.metrics, "cost", 0.0), 4),
+                    (s.pending or {}).get("id"), len(s.agents))
                 for k, s in sessions.items()}
 
     def live(self):
@@ -380,6 +439,16 @@ class SessionStore:
     def newest(self):
         live = self.live()
         return live[0] if live else None
+
+    def ranked(self):
+        """Most deserving of attention first: priority, then most recent."""
+        return sorted(self.sessions.values(), key=lambda s: (s.priority, s.ts),
+                      reverse=True)
+
+    def featured(self):
+        """The session the buddy himself mirrors. The rest become avatars."""
+        ranked = self.ranked()
+        return ranked[0] if ranked else None
 
 
 def _reap(path, session_id):
