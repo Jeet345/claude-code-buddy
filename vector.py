@@ -40,6 +40,7 @@ except ImportError as error:                      # pragma: no cover
         "  python3 build_vector.py vector_art.svg   vector_paths.py\n"
         "  python3 build_vector.py vector_props.svg vector_prop_paths.py\n"
         "(install.sh does this for you.)") from error
+import costume
 from face import Face, expression_for
 from vector_motion import Blink, Breath, Follow, Oscillator, Spring, squash
 
@@ -51,6 +52,7 @@ OUTLINE = (0.494, 0.227, 0.141)   # #7E3A24
 CORE = (0.380, 0.140, 0.075)      # the side turned away from the light
 BOUNCE = (1.000, 0.640, 0.440)    # warm light thrown back up off the ground
 SCREEN = (0.640, 0.800, 1.000)    # laptop screen light on his face
+SPARK = (0.960, 0.560, 0.380)     # the thinking spark, Claude Code's spinner orange
 
 OUTLINE_W = 0.6                   # in grid units; thin enough to read as an edge, not ink
 BODY_PARTS = ("leg_l", "leg_m", "leg_r", "arm_l", "arm_r", "body")
@@ -83,6 +85,8 @@ ANIM_MOTION = {
     "wave":    {"breath": 0.35, "eye": 1.05,
                 "osc": [("arm_r_raise", 1.5, 1.7, "sine")]},
 }
+
+ANIM_MOTION.update(costume.MOTION)
 
 THINK_DELAY = 1.5     # secs of thinking before the cloud shows
 
@@ -455,6 +459,8 @@ class Rig:
         self.blink = Blink(seed=seed)
         self.breath = Breath(rate=0.25)
         self.face = Face(seed=seed)
+        self.wardrobe = costume.Wardrobe(seed=seed)
+        self.listening = False       # set by the daemon: headphones on, waiting for you
         self._rand = random.Random(seed)
         self.particles = []          # [x, y, vx, vy, life, max_life, kind, colour, spin]
         # Weight. He leans into his walk and carries the lean a beat past a
@@ -529,6 +535,10 @@ class Rig:
             self.offsets["arm_l_raise"] = self.offsets.get("arm_l_raise", 0.0) + tap * max(0.0, math.sin(self.t * 15.0))
             self.offsets["arm_r_raise"] = self.offsets.get("arm_r_raise", 0.0) + tap * max(0.0, math.sin(self.t * 15.0 + math.pi))
 
+        # the costume steers arms and gaze, so it goes before the springs step
+        self.wardrobe.update(dt, self.anim if self.anim in costume.NAMES else
+                             ("listen" if self.listening else None), self)
+
         for spring in self.p.values():
             spring.step(dt)
 
@@ -594,7 +604,8 @@ class Rig:
         self._think_t = self._think_t + dt if self.face.expression == "thinking" else 0.0
         want = 1.0 if self._think_t > THINK_DELAY else 0.0
         self.thinking += (want - self.thinking) * min(1.0, dt * (7.0 if want else 9.0))
-        want = 1.0 if self.face.expression == "writing" else 0.0
+        # a costume brings its own props; the laptop is for replies only
+        want = 1.0 if self.face.expression == "writing" and not self.wardrobe.name else 0.0
         self.writing += (want - self.writing) * min(1.0, dt * 6.0)
 
         alive = []
@@ -774,6 +785,7 @@ class Rig:
         cr.restore()
 
         self.face.draw(cr, skin=skin)
+        self.wardrobe.draw(cr, self, skin)
         self._draw_thought(cr, facing)
         self._draw_laptop(cr)
         cr.restore()
@@ -862,58 +874,62 @@ class Rig:
         cr.restore()
 
     def _draw_thought(self, cr, facing):
-        """A thought cloud over his shoulder, with a typing-style row of dots.
+        """Claude Code's own thinking spark, spinning over his head.
 
-        Grows out of a two-puff trail from his head, floats a little, and the
-        dots inside pulse one after another - the one "thinking" sign people
-        already read without being told.
+        The terminal shows a little star that turns and changes shape while
+        Claude thinks; he shows the same one, so the two read as one signal.
+        Eight rays, alternate ones long and short, the ratio breathing so it
+        morphs between a plus, an asterisk and a star the way the CLI glyphs
+        cycle. Motes rise from his head into it: the thought coming from him.
         """
         a = max(0.0, min(1.0, self.thinking))
         if a < 0.02:
             return
-        grow = 0.55 + 0.45 * (1.0 - (1.0 - a) ** 3)      # ease-out pop
-        float_y = math.sin(self.t * 1.6) * 0.35
-        cx, cy = 33.2, 4.6 + float_y
+        grow = 0.4 + 0.6 * (1.0 - (1.0 - a) ** 3)       # ease-out pop
+        hat = self.wardrobe.name in ("build", "cook")
+        cx = 20.0
+        cy = (-3.4 if hat else 3.6) + math.sin(self.t * 1.6) * 0.4
+        top = 5.0 if hat else 11.6
         cr.save()
         cr.push_group()
-        # trail: two small puffs stepping up from his head to the cloud
-        for x, y, r in ((27.6, 10.6, 0.55), (29.6, 8.6, 0.85)):
-            cr.new_sub_path()
-            cr.arc(x, y + float_y * 0.5, r * grow, 0, math.tau)
-        # the cloud: overlapping puffs around an ellipse
-        cr.save()
-        cr.translate(cx, cy)
-        cr.scale(grow, grow)
-        puffs = ((-3.0, 0.4, 1.9), (-1.2, -0.9, 2.2), (1.2, -0.9, 2.1),
-                 (3.0, 0.3, 1.8), (1.4, 1.3, 1.7), (-1.4, 1.3, 1.7))
-        for x, y, r in puffs:
-            cr.new_sub_path()
-            cr.arc(x, y, r, 0, math.tau)
-        cr.restore()
-        path = cr.copy_path()
-        # outline first, fill over it: the puffs merge into one shape
-        cr.set_source_rgb(*OUTLINE)
-        cr.set_line_width(1.1)
-        cr.stroke()
-        cr.append_path(path)
-        cr.set_source_rgb(1.0, 0.985, 0.955)
-        cr.fill()
-        # soft top light, like the body
-        g = cairo.LinearGradient(0, cy - 2.6 * grow, 0, cy + 2.2 * grow)
-        g.add_color_stop_rgba(0, 1, 1, 1, 0.0)
-        g.add_color_stop_rgba(1, 0.86, 0.80, 0.74, 0.35)
-        cr.append_path(path)
-        cr.set_source(g)
-        cr.fill()
-        # typing dots, pulsing in turn
+
+        # motes drifting up from his head into the spark
         for i in range(3):
-            phase = (self.t * 2.2 - i * 0.22) % 1.0
-            lift = math.sin(min(1.0, phase * 2.0) * math.pi) if phase < 0.5 else 0.0
-            x = cx + (i - 1) * 1.9 * grow
-            y = cy + 0.15 - lift * 0.55
-            cr.arc(x, y, (0.58 + lift * 0.14) * grow, 0, math.tau)
-            cr.set_source_rgba(*OUTLINE, 0.55 + lift * 0.45)
+            f = (self.t * 0.9 + i / 3.0) % 1.0
+            x = cx + math.sin(f * 5.0 + i * 2.1) * 0.9
+            y = top + (cy + 2.2 - top) * f
+            cr.arc(x, y, 0.32 * (1.0 - f * 0.5) * grow, 0, math.tau)
+            cr.set_source_rgba(*SPARK, 0.85 * math.sin(f * math.pi))
             cr.fill()
+
+        # glow
+        r = 5.6 * grow
+        g = cairo.RadialGradient(cx, cy, 0, cx, cy, r)
+        g.add_color_stop_rgba(0.0, *SPARK, 0.45 * (0.8 + 0.2 * math.sin(self.t * 3.2)))
+        g.add_color_stop_rgba(1.0, *SPARK, 0.0)
+        cr.set_source(g)
+        cr.arc(cx, cy, r, 0, math.tau)
+        cr.fill()
+
+        # the spark: rays from the centre, outline under, fill over
+        morph = 0.5 + 0.5 * math.sin(self.t * 2.4)
+        spin = self.t * 1.3 * (1 if facing >= 0 else -1)
+        long_r = (3.0 + 0.4 * math.sin(self.t * 4.8)) * grow
+        short_r = long_r * (0.35 + 0.55 * morph)
+        for width, colour in ((1.25 * grow, OUTLINE), (0.6 * grow, SPARK)):
+            cr.set_line_cap(cairo.LINE_CAP_ROUND)
+            cr.set_line_width(width)
+            cr.set_source_rgb(*colour)
+            for k in range(8):
+                ang = spin + k * math.pi / 4.0
+                length = long_r if k % 2 == 0 else short_r
+                cr.move_to(cx, cy)
+                cr.line_to(cx + math.cos(ang) * length, cy + math.sin(ang) * length)
+            cr.stroke()
+        cr.arc(cx, cy, 0.55 * grow, 0, math.tau)
+        cr.set_source_rgb(1.0, 0.95, 0.88)
+        cr.fill()
+
         cr.pop_group_to_source()
         cr.paint_with_alpha(a)
         cr.restore()

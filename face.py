@@ -82,6 +82,12 @@ EXPRESSIONS = {
     "sleepy":    {"smile": 0.1, "open": 0.22, "mouth_w": 0.5, "brow_y": -0.15},
     "surprised": {"smile": 0.0, "open": 0.75, "mouth_w": 0.7,
                   "brow_y": 1.0, "eye_scale": 1.18},
+    "reading":   {"smile": 0.2, "squint": 0.08, "brow_y": 0.15, "mouth_w": 0.8},
+    "determined": {"smile": 0.2, "squint": 0.1, "brow_y": -0.25, "brow_tilt": -0.5,
+                   "mouth_w": 0.85},
+    "vibing":    {"smile": 0.75, "happy": 1.0, "blush": 0.3, "brow_y": 0.25},
+    "curious":   {"smile": 0.25, "open": 0.15, "mouth_w": 0.7, "brow_asym": 0.7,
+                  "brow_y": 0.35, "eye_scale": 1.08},
     "waving":    {"smile": 0.85, "open": 0.55, "mouth_w": 1.15, "happy": 1.0, "blush": 0.5,
                   "brow_y": 0.3},
 }
@@ -92,6 +98,8 @@ ANIM_EXPRESSION = {
     "idle": "neutral", "blink": "neutral", "patrol": "content",
     "working": "focused", "jump": "happy", "sleep": "sleepy",
     "error": "dizzy", "wake": "surprised", "wave": "waving",
+    "read": "reading", "write": "writing", "build": "determined",
+    "scan": "curious", "cook": "content",
 }
 
 

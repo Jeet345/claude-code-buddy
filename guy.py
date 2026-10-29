@@ -42,6 +42,7 @@ import cairo  # noqa: E402
 
 # Pure data, no GTK. The tool-to-costume table lives with the art it names so that
 # the daemon and preview.png can never disagree about who wears what.
+import costume  # noqa: E402
 from sprites import COSTUMES, TOOL_COSTUME  # noqa: E402
 
 import layout  # noqa: E402
@@ -119,6 +120,7 @@ WALK_RATE = 2.2       # how quickly avatars and sidekicks close on their spot, 1
 AVATAR_DIV = 2        # other sessions stand beside him at half his size
 SIDEKICK_DIV = 3      # subagents trail behind him, smaller still
 FOCUS_POLL = 1.0      # secs between "did you go back to the terminal?" checks
+LISTEN_AFTER = 20.0   # secs of waiting on you before the headphones go on
 CARD_ARM = 1.0        # secs a new prompt's buttons ignore clicks: it can pop up
                       # right where you were already clicking something else
 CMD_LINE = 64         # chars per line of a held command on the approval card
@@ -1314,6 +1316,14 @@ class Deck(Gtk.Window):
                 expression = "thinking"
             elif s and s.state == "working" and s.phase == "responding":
                 expression = "writing"
+        # Nothing to do and nobody asking: headphones on until there is.
+        # Sleep, a session starting work, or a prompt all take them off.
+        listening = (expression is None and c.mode in ("idle", "patrol")
+                     and now - c.last_activity > LISTEN_AFTER
+                     and not (s and s.state == "working"))
+        self.rig.listening = listening
+        if listening and c.anim in ("idle", "blink", "patrol"):
+            expression = "vibing"
         c.expression = expression
 
         face = self.rig.face
@@ -1528,7 +1538,9 @@ class Deck(Gtk.Window):
             vector.draw_prop(cr, key, c.x - sw * s / 2,
                              self.ground_y - sh * s, s)
 
-        specs = c.attachment_specs()
+        # Costumes the rig draws itself ride his body; only anything left in
+        # the old keyframed table is still pinned on from out here.
+        specs = [] if c.anim in costume.NAMES else c.attachment_specs()
         pop = max(0.0, self._prop_pop.x)
 
         def prop(key, ax, ay, rot):
