@@ -61,6 +61,11 @@ try:
     gi.require_version("Gtk", "3.0")
     import guy
     from guy import Creature, Deck
+    # These Decks raise staged alerts with toasts switched on. Record them,
+    # but never hand them to notify-send: they would land on the desktop of
+    # whoever runs the tests, indistinguishable from a real prompt.
+    import alerts
+    alerts.Notifier._run = lambda self, argv: True
     HAVE_GTK = True
 except Exception as exc:                                     # pragma: no cover
     print(f"cannot import the daemon ({exc}) - nothing to test")

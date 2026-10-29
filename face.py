@@ -34,6 +34,9 @@ BROW_LEN = 2.5
 INK = (0.13, 0.07, 0.05)          # lines: brows, mouth, closed eyes
 EYE_TOP = (0.08, 0.06, 0.06)
 EYE_LOW = (0.24, 0.13, 0.10)      # warm bounce light at the bottom of the eye
+IRIS = (0.46, 0.22, 0.13)         # warm brown ring, only just lighter than the eye
+PUPIL = (0.03, 0.02, 0.02)
+SOCKET = (0.38, 0.14, 0.075)      # the skin around the eye, set back from the light
 LID = (0.843, 0.463, 0.337)       # the body colour, for lids drawn over the eye
 MOUTH_IN = (0.38, 0.10, 0.08)
 TONGUE = (0.93, 0.47, 0.45)
@@ -179,24 +182,74 @@ class Face:
 
         if solid > 0.02 and open_ > 0.04:
             hh = h * min(1.0, open_)
+            ey = cy + (h - hh) * 0.18
+            # the socket: a soft shadow round the eye, so it sits in the face
+            # instead of on it
+            cr.save()
+            cr.translate(cx, ey + 0.25)
+            cr.scale(w * 0.85, hh * 0.78)
+            sock = cairo.RadialGradient(0, 0, 0.55, 0, 0, 1.0)
+            sock.add_color_stop_rgba(0.0, *SOCKET, 0.30 * solid)
+            sock.add_color_stop_rgba(1.0, *SOCKET, 0.0)
+            cr.set_source(sock)
+            cr.arc(0, 0, 1.0, 0, math.tau)
+            cr.fill()
+            cr.restore()
+
             cr.save()
             # a rounded pill: soft at this size, and it squashes cleanly
-            _pill(cr, cx, cy + (h - hh) * 0.18, w, hh)
+            _pill(cr, cx, ey, w, hh)
             grad = cairo.LinearGradient(0, cy - hh / 2, 0, cy + hh / 2)
             grad.add_color_stop_rgba(0.0, *EYE_TOP, solid)
             grad.add_color_stop_rgba(1.0, *EYE_LOW, solid)
             cr.set_source(grad)
             cr.fill_preserve()
             cr.clip()
+            gx = max(-1.2, min(1.2, v("gaze_x")))
+            gy = max(-1.2, min(1.2, v("gaze_y")))
+            # Iris and pupil lead the gaze a little further than the eye
+            # itself does: that small extra travel is what gives it depth.
+            ix, iy = cx + gx * w * 0.10, ey + hh * 0.06 + gy * hh * 0.08
+            ir = w * 0.40
+            iris = cairo.RadialGradient(ix, iy, ir * 0.35, ix, iy, ir)
+            iris.add_color_stop_rgba(0.0, *IRIS, 0.0)
+            iris.add_color_stop_rgba(0.55, *IRIS, 0.65 * solid)
+            iris.add_color_stop_rgba(1.0, *IRIS, 0.0)
+            cr.set_source(iris)
+            cr.arc(ix, iy, ir, 0, math.tau)
+            cr.fill()
+            cr.set_source_rgba(*PUPIL, 0.9 * solid)
+            cr.arc(ix, iy, ir * 0.42, 0, math.tau)
+            cr.fill()
+            # the upper lid's shadow across the top of the eye
+            top = cairo.LinearGradient(0, ey - hh / 2, 0, ey - hh / 2 + hh * 0.38)
+            top.add_color_stop_rgba(0.0, *PUPIL, 0.55 * solid)
+            top.add_color_stop_rgba(1.0, *PUPIL, 0.0)
+            cr.set_source(top)
+            cr.paint()
+            # wet rim: a faint bright line along the lower edge
+            cr.set_source_rgba(1, 0.86, 0.80, 0.22 * solid)
+            cr.set_line_width(0.28)
+            cr.arc(cx, ey - hh * 0.05, hh * 0.52, math.pi * 0.22, math.pi * 0.78)
+            cr.stroke()
             # Shines stay put relative to the eye: the light is above-left,
-            # not on the pupil, so they ride with the eye as it looks around.
+            # not on the pupil. They slide a touch against the gaze, the way a
+            # reflection moves on a curved surface.
             if hh > h * 0.45:
                 a = solid * min(1.0, (hh / h - 0.45) / 0.3)
-                cr.set_source_rgba(1, 1, 1, 0.92 * a)
-                cr.arc(cx - w * 0.2, cy - hh * 0.2, 0.62 * scale, 0, math.tau)
+                sx, sy = cx - w * 0.2 - gx * 0.22, ey - hh * 0.2 - gy * 0.15
+                r = 0.66 * scale
+                glow = cairo.RadialGradient(sx, sy, 0, sx, sy, r * 1.7)
+                glow.add_color_stop_rgba(0.0, 1, 1, 1, 0.55 * a)
+                glow.add_color_stop_rgba(1.0, 1, 1, 1, 0.0)
+                cr.set_source(glow)
+                cr.arc(sx, sy, r * 1.7, 0, math.tau)
                 cr.fill()
-                cr.set_source_rgba(1, 1, 1, 0.55 * a)
-                cr.arc(cx + w * 0.2, cy + hh * 0.22, 0.28 * scale, 0, math.tau)
+                cr.set_source_rgba(1, 1, 1, 0.95 * a)
+                cr.arc(sx, sy, r * 0.72, 0, math.tau)
+                cr.fill()
+                cr.set_source_rgba(1, 1, 1, 0.5 * a)
+                cr.arc(cx + w * 0.22 - gx * 0.1, ey + hh * 0.24, 0.26 * scale, 0, math.tau)
                 cr.fill()
             # Lids: body colour drawn over the top of the eye, tilted at the
             # inner corner. This is the squint, the frown and the sad droop.

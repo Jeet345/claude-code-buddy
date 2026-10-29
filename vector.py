@@ -48,8 +48,11 @@ BODY = (0.843, 0.463, 0.337)      # #D77656
 LIT = (0.910, 0.592, 0.478)       # #E8977A
 SHADE = (0.659, 0.325, 0.220)     # #A85338
 OUTLINE = (0.494, 0.227, 0.141)   # #7E3A24
+CORE = (0.380, 0.140, 0.075)      # the side turned away from the light
+BOUNCE = (1.000, 0.640, 0.440)    # warm light thrown back up off the ground
+SCREEN = (0.640, 0.800, 1.000)    # laptop screen light on his face
 
-OUTLINE_W = 0.9                   # in grid units; the sprite's was 1 hard pixel
+OUTLINE_W = 0.6                   # in grid units; thin enough to read as an edge, not ink
 BODY_PARTS = ("leg_l", "leg_m", "leg_r", "arm_l", "arm_r", "body")
 LEGS = ("leg_l", "leg_m", "leg_r")
 
@@ -159,25 +162,44 @@ def draw_prop(cr, name, x, y, scale, alpha=1.0, rotate=0.0, shadow=True):
 
     # A soft offset silhouette under the prop. Without it a prop sits flat
     # against the body it is pinned to and reads as painted on rather than held.
+    # Stacked at growing offsets and falling alpha, so the edge is soft: a
+    # held thing a little off the surface, not a decal with a drop shadow.
     if shadow and name not in _FLAT_PROPS:
-        cr.save()
-        cr.translate(0.5, 0.7)
-        for part in parts:
-            if prop_art.STYLE[part]["fill"] is None:
-                continue
-            prop_art.path(cr, part)
-        cr.set_source_rgba(0.19, 0.09, 0.05, 0.28 * alpha)
-        cr.fill()
-        cr.restore()
+        for dx, dy, a in ((0.35, 0.5, 0.14), (0.6, 0.85, 0.09), (0.9, 1.2, 0.05)):
+            cr.save()
+            cr.translate(dx, dy)
+            for part in parts:
+                if prop_art.STYLE[part]["fill"] is None:
+                    continue
+                prop_art.path(cr, part)
+            cr.set_source_rgba(0.19, 0.09, 0.05, a * alpha)
+            cr.fill()
+            cr.restore()
 
+    # clip first: an unclipped group is the size of the whole window
+    cr.rectangle(bx - 1.0, by - 1.0, bw + 2.0, bh + 2.0)
+    cr.clip()
+    cr.push_group()
     for part in parts:
         style = prop_art.STYLE[part]
         fill = style["fill"]
         if fill is None:
             continue
         prop_art.path(cr, part)
-        cr.set_source_rgba(*fill, style["fill_opacity"] * alpha)
+        cr.set_source_rgba(*fill, style["fill_opacity"])
         cr.fill()
+    # the same key light as his body: lit upper left, falling off lower right
+    if name not in _FLAT_PROPS:
+        cr.set_operator(cairo.OPERATOR_ATOP)
+        g = cairo.LinearGradient(bx, by, bx + bw, by + bh)
+        g.add_color_stop_rgba(0.0, 1, 1, 1, 0.22)
+        g.add_color_stop_rgba(0.45, 1, 1, 1, 0.0)
+        g.add_color_stop_rgba(0.6, 0, 0, 0, 0.0)
+        g.add_color_stop_rgba(1.0, 0, 0, 0, 0.22)
+        cr.set_source(g)
+        cr.paint()
+    cr.pop_group_to_source()
+    cr.paint_with_alpha(alpha)
     cr.restore()
     return True
 
@@ -280,6 +302,93 @@ def prop_rotation(name, anchors, phase):
     return max(-1.0, min(1.0, speed / 6.0)) * swing
 
 
+CLAY_PX = 4          # texture pixels per grid unit; 1:1 at the default size
+CLAY_PAD = 4         # grid units of texture beyond the 40x32 box, for squash
+_clay = None
+_form = None
+
+
+def _grid_pattern(surface):
+    """A texture made at CLAY_PX per grid unit, placed back on the grid."""
+    pattern = cairo.SurfacePattern(surface)
+    pattern.set_filter(cairo.FILTER_BILINEAR)
+    m = cairo.Matrix()
+    m.scale(CLAY_PX, CLAY_PX)
+    m.translate(CLAY_PAD, CLAY_PAD)
+    pattern.set_matrix(m)
+    return pattern
+
+
+def _form_texture():
+    """Soft darkening just inside the body's edge, which rounds the block
+    off, and the warm bounce light along its underside. Many faint rings so
+    no band shows - too many to stroke every frame, so done once here."""
+    global _form
+    if _form is not None:
+        return _form
+    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, int((VW + CLAY_PAD * 2) * CLAY_PX),
+                              int((VH + CLAY_PAD * 2) * CLAY_PX))
+    cr = cairo.Context(surf)
+    cr.scale(CLAY_PX, CLAY_PX)
+    cr.translate(CLAY_PAD, CLAY_PAD)
+    art.path(cr, "body")
+    cr.clip()
+    cr.set_source_rgba(*CORE, 0.022)
+    for step in range(12):
+        art.path(cr, "body")
+        cr.set_line_width(6.0 - step * 0.45)
+        cr.stroke()
+    _, by, _, bh = art.BOXES["body"]
+    g = cairo.LinearGradient(0.0, by + bh - 3.2, 0.0, by + bh)
+    g.add_color_stop_rgba(0.0, *BOUNCE, 0.0)
+    g.add_color_stop_rgba(1.0, *BOUNCE, 0.22)
+    cr.set_source(g)
+    cr.paint()
+    _form = surf
+    return surf
+
+
+def _clay_texture():
+    """Grain and lumps for the clay finish, made once and reused every frame.
+
+    Two layers of noise: soft blotches a few units across (thumb-pressed
+    unevenness) and per-pixel grain. Stored as light and dark speckles with
+    their own alpha, so it can be laid over any colour with ATOP."""
+    global _clay
+    if _clay is not None:
+        return _clay
+    rnd = random.Random(7)
+    w = int((VW + CLAY_PAD * 2) * CLAY_PX)
+    h = int((VH + CLAY_PAD * 2) * CLAY_PX)
+    cell = 3 * CLAY_PX
+    gw, gh = w // cell + 2, h // cell + 2
+    lumps = [[rnd.uniform(-1.0, 1.0) for _ in range(gw)] for _ in range(gh)]
+
+    def smooth(t):
+        return t * t * (3.0 - 2.0 * t)
+
+    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
+    stride = surf.get_stride()
+    data = surf.get_data()
+    for y in range(h):
+        gy, fy = divmod(y, cell)
+        ty = smooth(fy / cell)
+        row0, row1 = lumps[gy], lumps[gy + 1]
+        for x in range(w):
+            gx, fx = divmod(x, cell)
+            tx = smooth(fx / cell)
+            top = row0[gx] + (row0[gx + 1] - row0[gx]) * tx
+            bot = row1[gx] + (row1[gx + 1] - row1[gx]) * tx
+            n = (top + (bot - top) * ty) * 0.55 + rnd.uniform(-1.0, 1.0) * 0.45
+            a = int(min(1.0, abs(n)) * 0.10 * 255)
+            c = a if n > 0 else 0                  # premultiplied: white or black
+            i = y * stride + x * 4
+            data[i:i + 4] = bytes((c, c, c, a))
+    surf.mark_dirty()
+    _clay = surf
+    return surf
+
+
 def body_inset(scale):
     """`(top, left, right)` empty margin around the body, in pixels.
 
@@ -348,6 +457,17 @@ class Rig:
         self.face = Face(seed=seed)
         self._rand = random.Random(seed)
         self.particles = []          # [x, y, vx, vy, life, max_life, kind, colour, spin]
+        # Weight. He leans into his walk and carries the lean a beat past a
+        # stop; a turn pinches him narrow for an instant, the way a body turns
+        # through its thin side; and landing or stopping sets him wobbling.
+        self.drift = Spring(0.0, k=60.0, damping=0.55)     # degrees forward
+        self.turn = Spring(1.0, k=180.0, damping=0.55)     # width multiplier
+        self.jiggle = Spring(0.0, k=260.0, damping=0.22)   # + wide, - tall
+        self._last_x = None
+        self._vx = 0.0               # smoothed travel speed, px/s
+        self._stride = 0.0           # grid units a foot covers per step
+        self._facing = None
+        self._moving = False
         self._phase = ""
         self._fidget_in = self._rand.uniform(12.0, 25.0)
         self.thinking = 0.0          # 0..1 fade of the thought cloud
@@ -427,7 +547,25 @@ class Rig:
         self.squash_x, self.squash_y = squash(-self._y_speed, gain=0.0012)
 
     def _motion_extras(self, dt, creature):
-        """Jump anticipation and landing, particles, idle fidgets."""
+        """Weight, jump anticipation and landing, particles, idle fidgets."""
+        x = float(getattr(creature, "x", 0.0) or 0.0)
+        vx = (x - self._last_x) / dt if (self._last_x is not None and dt > 0) else 0.0
+        self._last_x = x
+        if abs(vx) < 400.0:                 # a teleport is not a walk
+            self._vx += (vx - self._vx) * min(1.0, dt * 10.0)
+        facing = getattr(creature, "facing", 1) or 1
+        if self._facing is not None and facing != self._facing:
+            self.turn.x = 0.62
+        self._facing = facing
+        # forward is whichever way he faces; a drag backwards leans him back
+        self.drift.target = max(-6.0, min(6.0, vx * facing * 0.08))
+        moving = abs(vx) > 1.0
+        if self._moving and not moving:
+            self.jiggle.nudge(8.0)                           # settling after a stop
+        self._moving = moving
+        for spring in (self.drift, self.turn, self.jiggle):
+            spring.step(dt)
+
         phase = getattr(creature, "jump_phase", "") or ""
         if phase != self._phase:
             if phase == "crouch":
@@ -439,6 +577,7 @@ class Rig:
                     self._confetti(10 + int(getattr(creature, "y_off", 0) or 0) // 3)
             elif phase == "land":
                 self.p["stretch"].nudge(-4.5)                # squash on impact
+                self.jiggle.nudge(14.0)
                 self._dust()
             self._phase = phase
 
@@ -510,6 +649,23 @@ class Rig:
         phase = (self.leg_phase + index / float(count)) % 1.0
         return max(0.0, math.sin(phase * math.tau)) * amount
 
+    def foot_shift(self, index, count=3):
+        """Grid units to slide one leg forward, so a planted foot holds still
+        on the ground while the body travels over it.
+
+        The lift half of the cycle (sin > 0) is the swing: the foot eases from
+        a stride behind to a stride ahead. The other half is the stance: it
+        runs backward at exactly the body's speed, which is what keeps it from
+        skating. Standing still, the stride is zero and this does nothing."""
+        if self.leg_rate <= 0.0 or self._stride <= 0.01:
+            return 0.0
+        phase = (self.leg_phase + index / float(count)) % 1.0
+        half = self._stride / 2.0
+        if phase < 0.5:
+            eased = 0.5 - 0.5 * math.cos(math.pi * phase / 0.5)
+            return -half + self._stride * eased
+        return half - self._stride * (phase - 0.5) / 0.5
+
     # -- rendering --------------------------------------------------------
 
     @staticmethod
@@ -531,6 +687,9 @@ class Rig:
             if name in LEGS:
                 index = LEGS.index(name)
                 lift = self.leg_offset(index)
+                shift = self.foot_shift(index)
+                if shift:
+                    cr.translate(shift, 0.0)
                 if lift > 0.001:
                     _, y0, _, y1 = art.bounds(art.SHAPES[name])
                     length = y1 - y0
@@ -546,6 +705,12 @@ class Rig:
             cr.restore()
 
     def draw(self, cr, x, y, w, h, facing=1):
+        # A stance lasts half a cycle; the ground moves under him by speed x
+        # that long, in grid units at the size he is drawn.
+        if self.leg_rate > 0.0 and w > 0:
+            self._stride = min(6.0, abs(self._vx) / (w / VW) * 0.5 / self.leg_rate)
+        else:
+            self._stride = 0.0
         cr.save()
         cr.translate(x, y)
         cr.scale(w / VW, h / VH)
@@ -565,8 +730,10 @@ class Rig:
         fx, fy = art.ANCHORS["feet"]
         cr.translate(fx, fy)
         stretch = max(0.5, self.value("stretch"))
-        cr.scale(self.squash_x / stretch, self.squash_y * stretch)
-        tilt = self.value("tilt")
+        j = max(-0.5, min(0.5, self.jiggle.x * 0.06))
+        cr.scale(self.squash_x / stretch * (1.0 + j) * max(0.3, self.turn.x),
+                 self.squash_y * stretch * (1.0 - j))
+        tilt = self.value("tilt") + self.drift.x
         if abs(tilt) > 0.02:
             cr.rotate(math.radians(tilt))
         cr.translate(-fx, -fy)
@@ -589,12 +756,24 @@ class Rig:
         for _ in self._parts(cr):
             cr.stroke()
 
+        # Fill and lighting go into one group, and the face's lids are filled
+        # with that same group, so a squint shows the shaded skin behind it.
+        cr.save()
+        ax, ay, aw, ah = art.BOXES["all"]
+        cr.rectangle(ax - 1.5, ay - 1.5, aw + 3.0, ah + 3.0)    # every paint below
+        cr.clip()                                            # covers only this
+        cr.push_group()
         cr.set_source(self._gradient())
         for _ in self._parts(cr):
             cr.fill()
+        self._draw_form(cr)
         self._draw_sheen(cr)
+        skin = cr.pop_group()
+        cr.set_source(skin)
+        cr.paint()
+        cr.restore()
 
-        self.face.draw(cr, skin=self._gradient())
+        self.face.draw(cr, skin=skin)
         self._draw_thought(cr, facing)
         self._draw_laptop(cr)
         cr.restore()
@@ -604,21 +783,82 @@ class Rig:
         self._draw_particles(cr, "confetti")
         cr.restore()
 
+    def _draw_form(self, cr):
+        """Light from the upper left, painted over the flat fill. Every layer
+        uses ATOP, so it only lands where body is already drawn.
+
+        Key and core give the direction; the darkened rim is what rounds the
+        block off; bounce and contact shadow are what put him on a floor."""
+        bx, by, bw, bh = art.BOXES["body"]
+        cr.save()
+        cr.set_operator(cairo.OPERATOR_ATOP)
+
+        # key to core: lit upper left, falling off to the far lower right
+        g = cairo.LinearGradient(bx - 2.0, by - 2.0, bx + bw + 2.0, VH)
+        g.add_color_stop_rgba(0.00, 1, 1, 1, 0.14)
+        g.add_color_stop_rgba(0.40, 1, 1, 1, 0.0)
+        g.add_color_stop_rgba(0.62, *CORE, 0.0)
+        g.add_color_stop_rgba(1.00, *CORE, 0.34)
+        cr.set_source(g)
+        cr.paint()
+
+        # rounded edges and the floor's bounce light: fixed to the body, so
+        # drawn once into a texture rather than stroked every frame
+        cr.set_source(_grid_pattern(_form_texture()))
+        cr.paint()
+
+        # contact shadow: where the legs tuck under the body, and the arms'
+        # inner ends where they meet its sides
+        # (clipped to outside the body: limbs run on under it, and shading
+        # those hidden ends would show through as dark patches on the torso)
+        cr.save()
+        cr.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
+        cr.rectangle(-4.0, -4.0, VW + 8.0, VH + 8.0)
+        art.path(cr, "body")
+        cr.clip()
+        cr.set_fill_rule(cairo.FILL_RULE_WINDING)
+        under = cairo.LinearGradient(0.0, by + bh - 0.4, 0.0, by + bh + 2.2)
+        under.add_color_stop_rgba(0.0, *CORE, 0.45)
+        under.add_color_stop_rgba(1.0, *CORE, 0.0)
+        for name in self._parts(cr):
+            if name in LEGS:
+                cr.set_source(under)
+                cr.fill()
+            elif name in ("arm_l", "arm_r"):
+                edge = bx if name == "arm_l" else bx + bw
+                out = -2.6 if name == "arm_l" else 2.6
+                g = cairo.LinearGradient(edge, 0.0, edge + out, 0.0)
+                g.add_color_stop_rgba(0.0, *CORE, 0.30)
+                g.add_color_stop_rgba(1.0, *CORE, 0.0)
+                cr.set_source(g)
+                cr.fill()
+            else:
+                cr.new_path()
+        cr.restore()
+        cr.restore()
+
     def _draw_sheen(self, cr):
-        """A soft highlight along the top of the body: light from above, and
-        the difference between a flat sticker and something with volume."""
+        """The clay finish: a broad, dull sheen where the light lands - matte
+        surfaces spread a highlight instead of focusing it - over a fixed grain
+        that rides with the body, so it reads as the surface, not the screen."""
         bx, by, bw, bh = art.BOXES["body"]
         cr.save()
         art.path(cr, "body")
         cr.clip()
-        cr.translate(bx + bw * 0.42, by + 1.6)
-        cr.scale(bw * 0.42, 2.4)
+        cr.translate(bx + bw * 0.36, by + 3.0)
+        cr.scale(bw * 0.55, 5.5)
         g = cairo.RadialGradient(0, 0, 0, 0, 0, 1)
-        g.add_color_stop_rgba(0, 1, 1, 1, 0.30)
-        g.add_color_stop_rgba(1, 1, 1, 1, 0.0)
+        g.add_color_stop_rgba(0, 1, 0.96, 0.90, 0.16)
+        g.add_color_stop_rgba(1, 1, 0.96, 0.90, 0.0)
         cr.set_source(g)
         cr.arc(0, 0, 1, 0, math.tau)
         cr.fill()
+        cr.restore()
+
+        cr.save()
+        cr.set_operator(cairo.OPERATOR_ATOP)
+        cr.set_source(_grid_pattern(_clay_texture()))
+        cr.paint()
         cr.restore()
 
     def _draw_thought(self, cr, facing):
@@ -685,6 +925,19 @@ class Rig:
             return
         rise = (1.0 - a) * 3.0                     # slides up into place
         x0, x1, top, base = 13.6, 26.4, 23.6 + rise, 29.4 + rise
+        # The screen faces him: a cool glow up his front and across his face,
+        # flickering faintly as the text under it changes.
+        flicker = 0.85 + 0.15 * math.sin(self.t * 9.0) * math.sin(self.t * 3.7)
+        cr.save()
+        art.path(cr, "body")
+        cr.clip()
+        g = cairo.RadialGradient(20.0, top - 1.0, 0.0, 20.0, top - 1.0, 11.0)
+        g.add_color_stop_rgba(0.0, *SCREEN, 0.42 * a * flicker)
+        g.add_color_stop_rgba(0.5, *SCREEN, 0.14 * a * flicker)
+        g.add_color_stop_rgba(1.0, *SCREEN, 0.0)
+        cr.set_source(g)
+        cr.paint()
+        cr.restore()
         cr.save()
         cr.push_group()
         art_round = 1.0
