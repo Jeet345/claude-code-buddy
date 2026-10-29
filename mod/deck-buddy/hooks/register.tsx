@@ -463,6 +463,26 @@ export const register: Register = on => {
       }
       return next(e)
     }
+    // A question in the AskUserQuestion dialog: Claude's own, or any mod's
+    // $.ui.ask (commit-guard's approve / task ID), which runs as this same
+    // call. Neither raises a Notification, so this is the only place to see
+    // that the person is being waited on. Raise it like a permission prompt,
+    // and put back whatever call it interrupted once it is answered.
+    if (e.tool === 'AskUserQuestion') {
+      const outer = { tool: S.tool, input: S.input, phase: S.phase }
+      const qs = (argsOf(e) as { questions?: { question?: string }[] }).questions
+      setAlert('elicitation_dialog', qs?.[0]?.question || 'Claude has a question for you')
+      await stamp($, 'Notification')
+      await write($)
+      try {
+        return await next(e)
+      } finally {
+        if (S.alert === 'elicitation_dialog') clearAlert()
+        Object.assign(S, outer)
+        await stamp($, 'PostToolUse')
+        await write($)
+      }
+    }
     S.state = 'working'
     S.phase = 'tool'
     S.tool = e.tool
