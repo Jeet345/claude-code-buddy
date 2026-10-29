@@ -115,6 +115,10 @@ BUBBLE_GAP = 10       # px between the top of his head and the bubble's tail
 BUBBLE_LINGER = 2.5   # secs the last step stays readable after it ends
 BUBBLE_FADE = 0.6     # secs it takes to fade out after that
 SIZES = {"Small": 3, "Medium": 4, "Large": 5, "Huge": 6}   # right-click -> Size
+ROAM_MODES = {"Off": "off", "Along the bottom": "floor", "Whole border": "border"}
+STROLL_CHANCE = 0.3   # of his idle walks, how many are strolls that leave home
+STROLL_SECS = (8.0, 18.0)
+SETTLE_SPEED = 120    # px/s he walks back on screen if work catches him mid-wrap
 DEFAULT_SCALE = 4
 WALK_RATE = 2.2       # how quickly avatars and sidekicks close on their spot, 1/s
 AVATAR_DIV = 2        # other sessions stand beside him at half his size
@@ -145,6 +149,9 @@ class Creature:
         self.idle_secs = idle_secs
         self.facing = 1
         self.min_x, self.max_x = 0.0, float("inf")   # replaced by Deck.set_limits
+        self.roam = "off"         # Deck's Roam setting: off / floor / border
+        self.wrap_w = None        # window width; a stroll off one side enters the other
+        self._stroll = False
 
         self.mode = "idle"
         self.costume = None
@@ -322,6 +329,7 @@ class Creature:
             self._update_idle(dt, now)
         else:
             self._advance(dt)
+        self._settle(dt)
 
         # Working is a state we only ever hear about second hand, so it needs a
         # timeout. Claude Code refreshes it on every PreToolUse; a long silence means
@@ -385,10 +393,14 @@ class Creature:
         elif now > self._next_decision:
             self._next_decision = now + random.uniform(5, 10)
             if random.random() < 0.6:
-                self.start_patrol(now, random.uniform(1.5, 4.0))
+                if self.roam != "off" and random.random() < STROLL_CHANCE:
+                    self.start_patrol(now, random.uniform(*STROLL_SECS), stroll=True)
+                else:
+                    self.start_patrol(now, random.uniform(1.5, 4.0))
 
-    def start_patrol(self, now, secs, direction=None):
+    def start_patrol(self, now, secs, direction=None, stroll=False):
         self.mode = "patrol"
+        self._stroll = stroll and bool(self.wrap_w)
         self._dir = direction or random.choice((-1, 1))
         self.facing = self._dir
         self._patrol_until = now + secs
@@ -396,6 +408,9 @@ class Creature:
 
     def _update_patrol(self, dt, now):
         self._advance(dt)
+        if self._stroll:
+            self._update_stroll(dt, now)
+            return
         # He turns at whichever comes first, the edge of his patch or the edge of
         # the screen, so a home position near a corner shortens the walk instead of
         # marching him off the display.
@@ -412,6 +427,53 @@ class Creature:
             self.facing = 1
             self._next_decision = now + random.uniform(4, 9)
             self._play("idle")
+
+    def _update_stroll(self, dt, now):
+        """A long walk that ignores home: off one side of the screen, in the other.
+
+        x stays in [0, wrap_w) and the window draws a second copy of him on the
+        far side while he straddles the edge (`ghost_dx`), so the crossing is
+        one continuous body and not a jump. Time running out mid-crossing does
+        not stop him there: he walks on until all of him is back on screen.
+        """
+        self.x = (self.x + self._dir * PATROL_SPEED * dt) % self.wrap_w
+        self.facing = self._dir
+        if now > self._patrol_until and self.min_x <= self.x <= self.max_x:
+            self._stroll = False
+            self.home_x = self.x        # wherever he wandered to is home now
+            self.mode = "idle"
+            self.facing = 1
+            self._next_decision = now + random.uniform(4, 9)
+            self._play("idle")
+
+    def ghost_dx(self):
+        """Offset of the second copy of him while he straddles a screen edge, or 0."""
+        if not self.wrap_w:
+            return 0
+        half = self.sp.w / 2
+        if self.x + half > self.wrap_w:
+            return -self.wrap_w
+        if self.x - half < 0:
+            return self.wrap_w
+        return 0
+
+    def _settle(self, dt):
+        """Anything that stopped a stroll mid-crossing leaves him half off screen;
+        walk him the rest of the way in rather than snapping him there."""
+        if self.mode == "patrol" and self._stroll:
+            return
+        if self.mode != "patrol":
+            self._stroll = False
+        target = self.clamp(self.x)
+        if self.x != target and self.wrap_w:
+            # the short way: off the right edge he is nearer the left one
+            d = target - self.x
+            if abs(d) > self.wrap_w / 2:
+                d -= math.copysign(self.wrap_w, d)
+            step = math.copysign(min(abs(d), SETTLE_SPEED * dt), d)
+            self.x = (self.x + step) % self.wrap_w
+            if abs(d) <= SETTLE_SPEED * dt:
+                self.x = target
 
     def _update_jump(self, dt):
         """Pose frames come from the atlas; the vertical travel is computed here."""
@@ -484,8 +546,11 @@ class Creature:
 
 
 
-def primary_geometry():
+def primary_geometry(workarea=False):
     """Rect of the monitor he lives on, across GTK3's three monitor APIs.
+
+    With `workarea` it is the part of that monitor panels and docks leave free,
+    which is what he roams: along the edge of the top bar, not under it.
 
     get_primary_monitor() on Gdk.Display is 3.22+; before that the same two
     questions were asked of Gdk.Screen. A multi-head box with no primary set
@@ -501,6 +566,8 @@ def primary_geometry():
         if monitor is None and hasattr(display, "get_monitor"):
             monitor = display.get_monitor(0)
     if monitor is not None:
+        if workarea and hasattr(monitor, "get_workarea"):
+            return monitor.get_workarea()
         return monitor.get_geometry()
 
     screen = display.get_default_screen() if display else Gdk.Screen.get_default()
@@ -518,12 +585,15 @@ class Deck(Gtk.Window):
         scale = args.scale or int(prefs0.get("scale", DEFAULT_SCALE))
         self.sp = vector.Sheet(scale if scale in SIZES.values() else DEFAULT_SCALE)
 
-        geo = primary_geometry()
-        self.win_w, self.win_h = geo.width, self._strip_height()
+        self.roam = prefs0.get("roam", "border")
+        if self.roam not in ROAM_MODES.values():
+            self.roam = "border"
+        gx, gy, self.win_w, self.win_h = self._window_rect()
         self.ground_y = self.win_h - GROUND_MARGIN
 
-        home = self._load_home(geo.width // 2)
+        home = self._load_home(self.win_w // 2)
         self.creature = Creature(self.sp, home, args.idle_secs, on_stale=self.on_stale)
+        self.creature.roam = self.roam
         self.rig = vector.Rig()
         self._fence()
 
@@ -538,7 +608,7 @@ class Deck(Gtk.Window):
         self.set_accept_focus(False)
         self.set_type_hint(Gdk.WindowTypeHint.DOCK)
         self.set_default_size(self.win_w, self.win_h)
-        self.move(geo.x, geo.y + geo.height - self.win_h)
+        self.move(gx, gy)
         self.stick()
 
         self.add_events(
@@ -662,6 +732,41 @@ class Deck(Gtk.Window):
         """Tall enough for him, his highest hop, and the tallest readout."""
         return max(self.args.height or 0, self.sp.h + 340)
 
+    def _window_rect(self):
+        """(x, y, w, h) of the window, in screen coordinates.
+
+        Roaming needs the whole free area of the monitor: walls and ceiling are
+        just places to draw in one window, and the bubble and card never have
+        to cross from one window into another. With roaming off he only ever
+        needs the strip along the bottom, so that is all he takes.
+        """
+        geo = primary_geometry(workarea=True)
+        if self.roam == "off":
+            h = min(self._strip_height(), geo.height)
+            return geo.x, geo.y + geo.height - h, geo.width, h
+        return geo.x, geo.y, geo.width, geo.height
+
+    def _place_window(self):
+        """Size and move the window to `_window_rect`, and fence him inside it."""
+        x, y, self.win_w, self.win_h = self._window_rect()
+        self.ground_y = self.win_h - GROUND_MARGIN
+        self.resize(self.win_w, self.win_h)
+        self.move(x, y)
+        self._fence()
+        self._last_key = None
+        self.queue_draw()
+        return x, y
+
+    def set_roam(self, roam):
+        """Right-click -> Roam. Remembered in prefs.json."""
+        if roam == self.roam:
+            return
+        self.roam = self.creature.roam = roam
+        self._place_window()
+        self.creature.x = self.creature.clamp(self.creature.x)
+        self._save_prefs()
+        print(f"roam -> {roam}", flush=True)
+
     def set_scale(self, scale):
         """Resize him live, from the Size menu. Remembered in prefs.json."""
         if scale == self.sp.scale:
@@ -672,12 +777,7 @@ class Deck(Gtk.Window):
         self._avatars.clear()
         self._sidekicks.clear()
         self._walk.clear()
-        geo = primary_geometry()
-        self.win_h = self._strip_height()
-        self.ground_y = self.win_h - GROUND_MARGIN
-        self.resize(self.win_w, self.win_h)
-        self.move(geo.x, geo.y + geo.height - self.win_h)
-        self._fence()
+        self._place_window()
         self.creature.x = self.creature.clamp(self.creature.x)
         self._last_key = None
         self.queue_draw()
@@ -688,16 +788,12 @@ class Deck(Gtk.Window):
         """Keep his whole body on screen, however wide the strip currently is."""
         half = self.sp.w / 2
         self.creature.set_limits(half + EDGE_MARGIN, self.win_w - half - EDGE_MARGIN)
+        self.creature.wrap_w = self.win_w
 
     def _refit(self):
-        """Screen layout changed - re-hug the bottom of the primary monitor."""
-        geo = primary_geometry()
-        self.win_w = geo.width
-        self.ground_y = self.win_h - GROUND_MARGIN
-        self.resize(self.win_w, self.win_h)
-        self.move(geo.x, geo.y + geo.height - self.win_h)
-        self._fence()
-        print(f"refit to {geo.width}x{geo.height}+{geo.x}+{geo.y}", flush=True)
+        """Screen layout changed - re-hug the primary monitor."""
+        x, y = self._place_window()
+        print(f"refit to {self.win_w}x{self.win_h}+{x}+{y}", flush=True)
 
     def _load_home(self, default):
         try:
@@ -725,7 +821,8 @@ class Deck(Gtk.Window):
                           "toast": self.alerts.toast, "sound": self.alerts.sound,
                           "click_focus": self.click_focus,
                           "approve": self.approvals.enabled,
-                          "scale": self.sp.scale})
+                          "scale": self.sp.scale,
+                          "roam": self.roam})
             PREFS.write_text(json.dumps(prefs, indent=2))
         except OSError:
             pass
@@ -1261,8 +1358,11 @@ class Deck(Gtk.Window):
         if key != getattr(self, "_last_key", None):
             self._last_key = key
             pad = 90  # room for props, sparkles and the zzz trail
-            for b in filter(None, (self._last_bbox, bbox)):
+            ghost = c.ghost_dx()
+            bodies = [bbox] + ([(bbox[0] + ghost,) + bbox[1:]] if ghost else [])
+            for b in filter(None, [*getattr(self, "_last_bodies", ()), *bodies]):
                 self.queue_draw_area(b[0] - pad, b[1] - pad, b[2] + pad * 2, b[3] + pad * 2)
+            self._last_bodies = bodies
             for r in filter(None, (self._last_readout, rect)):
                 # padded for the pop's overshoot, which draws a little outside
                 padx, pady = int(r[2] * 0.06) + 4, int(r[3] * 0.12) + 4
@@ -1528,17 +1628,10 @@ class Deck(Gtk.Window):
 
     # ------------------------------------------------------------------- draw
 
-    def on_draw(self, _widget, cr):
-        cr.set_operator(cairo.OPERATOR_SOURCE)
-        cr.set_source_rgba(0, 0, 0, 0)
-        cr.paint()
-        cr.set_operator(cairo.OPERATOR_OVER)
-
-        c = self.creature
+    def _draw_body(self, cr, c, now):
+        """Him, his shadow and everything that rides on him."""
         s = self.sp.scale
         x, y, w, h = c.bbox(self.ground_y)
-        now = time.time()
-
         # Ground shadow: tightens as he rises, which is what sells the jump height.
         if c.mode != "sleep":
             tier = 0 if c.y_off < 6 else (1 if c.y_off < 26 else 2)
@@ -1585,6 +1678,26 @@ class Deck(Gtk.Window):
             pw, ph = vector.prop_size(key)
             vector.draw_prop(cr, key, x + w / 2 - pw * s / 2,
                              y - ph * s / 2, s, alpha=1.0 - t)
+
+    def on_draw(self, _widget, cr):
+        cr.set_operator(cairo.OPERATOR_SOURCE)
+        cr.set_source_rgba(0, 0, 0, 0)
+        cr.paint()
+        cr.set_operator(cairo.OPERATOR_OVER)
+
+        c = self.creature
+        s = self.sp.scale
+        x, y, w, h = c.bbox(self.ground_y)
+        now = time.time()
+
+        # Straddling a screen edge on a stroll, he is drawn twice: the part off
+        # one side shows on the other.
+        ghost = c.ghost_dx()
+        for dx in (0, ghost) if ghost else (0,):
+            cr.save()
+            cr.translate(dx, 0)
+            self._draw_body(cr, c, now)
+            cr.restore()
 
         self.draw_context_pip(cr, c)
         self.draw_alert_badge(cr, c, now)
@@ -1794,6 +1907,15 @@ class Deck(Gtk.Window):
         print("quit by menu; --ensure will leave him alone until asked", flush=True)
         Gtk.main_quit()
 
+    def go_stroll(self):
+        """Menu: a stroll now, so the wrap can be seen without waiting for one."""
+        c = self.creature
+        if self.roam == "off" or c.mode not in ("idle", "patrol"):
+            self.say("Roaming is off" if self.roam == "off" else "Busy right now", 2.0)
+            return
+        c.last_activity = time.time()
+        c.start_patrol(time.time(), random.uniform(*STROLL_SECS), stroll=True)
+
     def menu(self, ev):
         m = Gtk.Menu()
         toggle = Gtk.CheckMenuItem(label="Speech bubble")
@@ -1829,6 +1951,17 @@ class Deck(Gtk.Window):
             sizes.append(item)
         size_item.set_submenu(sizes)
         m.append(size_item)
+        roam_item = Gtk.MenuItem(label="Roam")
+        roams = Gtk.Menu()
+        group = None
+        for label, roam in ROAM_MODES.items():
+            item = Gtk.RadioMenuItem.new_with_label_from_widget(group, label)
+            group = item
+            item.set_active(roam == self.roam)
+            item.connect("toggled", lambda it, r=roam: it.get_active() and self.set_roam(r))
+            roams.append(item)
+        roam_item.set_submenu(roams)
+        m.append(roam_item)
         m.append(Gtk.SeparatorMenuItem())
 
         items = [
@@ -1839,6 +1972,7 @@ class Deck(Gtk.Window):
             ("Jump!", lambda *_: self.creature.set_mode("jump", 45)),
             ("Nap now", lambda *_: self.creature.set_mode("sleep")),
             ("Headphones on", lambda *_: self.put_on_headphones(time.time())),
+            ("Go for a stroll", lambda *_: self.go_stroll()),
         ]
         items += [
             (f"Costume: {name}", lambda _i, n=name: (

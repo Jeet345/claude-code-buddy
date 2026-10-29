@@ -250,7 +250,7 @@ GTK's linking. `notify.sh` always strips them.
 |---|---|
 | `--demo` | cycles every pose and costume, ignores hooks — the fastest way to see the art |
 | `--scale N` | pixel size, default 4 (he is 40×32 authored, so 160×128 on screen) |
-| `--height N` | height of the invisible strip he lives in, default 460 |
+| `--height N` | height of the invisible strip he lives in when Roam is Off, default 460 |
 | `--idle-secs N` | seconds of nothing before he sleeps, default 300 |
 | `--no-log` | print to the terminal instead of `guy.log` |
 | `--no-shape` | skip click-through, for debugging where the window actually is |
@@ -267,9 +267,11 @@ he **jumps you to that session's terminal** and waves. Hover him for the readout
 | **Click jumps to terminal** | what a left-click does. On by default, remembered |
 | **Answer prompts from buddy** | hold permission prompts on him while you are elsewhere — off by default, remembered |
 | **Size** | Small / Medium / Large / Huge, applied live and remembered (`--scale` overrides) |
+| **Roam** | Off (bottom strip only) / Along the bottom / Whole border. With it on, some idle walks become strolls that leave home and wrap off one side of the screen onto the other |
 | Focus terminal | do it now, without clicking — still there when the click is turned off |
 | Wave / Jump! / Nap now | play a state on demand |
 | Headphones on | skip the 20s wait and put them on now |
+| Go for a stroll | start a stroll now instead of waiting for one |
 | Costume: … | force a costume, for checking the art |
 | Quit | stop the daemon, **and keep him stopped** |
 
