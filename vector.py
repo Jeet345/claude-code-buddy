@@ -347,15 +347,6 @@ class Rig:
         self.breath = Breath(rate=0.25)
         self.face = Face(seed=seed)
         self._rand = random.Random(seed)
-        # The antenna: a stalk on a spring that lags behind his motion, with a
-        # bulb that is also a status light. The single cheapest piece of charm
-        # here - every hop, turn and breath shows up in it a beat late.
-        self.stalk = Spring(0.0, k=70.0, damping=0.28)
-        self.light = None            # (r, g, b) or None; set by the daemon
-        self.antenna_lift = 0.0      # grid units taller, so the bulb clears a hat
-        self._lift = 0.0
-        self.light_pulse = False
-        self._last_x = None
         self.particles = []          # [x, y, vx, vy, life, max_life, kind, colour, spin]
         self._phase = ""
         self._fidget_in = self._rand.uniform(12.0, 25.0)
@@ -436,17 +427,7 @@ class Rig:
         self.squash_x, self.squash_y = squash(-self._y_speed, gain=0.0012)
 
     def _motion_extras(self, dt, creature):
-        """Antenna, jump anticipation and landing, particles, idle fidgets."""
-        # antenna lags horizontal travel and vertical speed
-        x = float(getattr(creature, "x", 0.0) or 0.0)
-        vx = (x - self._last_x) / dt if (self._last_x is not None and dt > 0) else 0.0
-        self._last_x = x
-        facing = getattr(creature, "facing", 1) or 1
-        self.stalk.target = max(-1.0, min(1.0, -vx * 0.01 * facing))
-        self.stalk.nudge(self._y_speed * 0.004)
-        self.stalk.step(dt)
-        self._lift += (self.antenna_lift - self._lift) * min(1.0, dt * 8.0)
-
+        """Jump anticipation and landing, particles, idle fidgets."""
         phase = getattr(creature, "jump_phase", "") or ""
         if phase != self._phase:
             if phase == "crouch":
@@ -498,7 +479,6 @@ class Rig:
             self.p["stretch"].nudge(3.0)
         elif pick == "bounce":
             self.p["bob"].nudge(-14.0)
-            self.stalk.nudge(6.0)
         else:
             self.blink.force(double=True)
 
@@ -603,8 +583,6 @@ class Rig:
         # limb's outline across the torso it is joined to; doing every stroke
         # before any fill leaves the seams covered and only the silhouette
         # outlined.
-        self._draw_antenna(cr)
-
         cr.set_line_join(cairo.LINE_JOIN_ROUND)
         cr.set_line_width(OUTLINE_W * 2.0)
         cr.set_source_rgb(*OUTLINE)
@@ -624,45 +602,6 @@ class Rig:
         cr.translate(x, y)
         cr.scale(w / VW, h / VH)
         self._draw_particles(cr, "confetti")
-        cr.restore()
-
-    def _draw_antenna(self, cr):
-        """Stalk from the top of his head, bulb on the end. Drawn before the
-        body so the body's outline covers the root."""
-        base_x, base_y = 20.0, 12.4
-        sway = self.stalk.x
-        tip_x = base_x + 1.2 + sway * 2.6
-        tip_y = base_y - 4.6 - self._lift + abs(sway) * 0.6
-        cr.save()
-        cr.set_line_cap(cairo.LINE_CAP_ROUND)
-        cr.move_to(base_x, base_y + 0.6)
-        cr.curve_to(base_x, base_y - 2.0, tip_x - sway * 1.2, tip_y + 1.6, tip_x, tip_y)
-        cr.set_source_rgb(*OUTLINE)
-        cr.set_line_width(1.6)
-        cr.stroke_preserve()
-        cr.set_source_rgb(*SHADE)
-        cr.set_line_width(0.6)
-        cr.stroke()
-        r = 1.25
-        colour = self.light or LIT
-        glow = 0.0
-        if self.light is not None:
-            glow = 0.35 + (0.25 * (0.5 + 0.5 * math.sin(self.t * 4.0)) if self.light_pulse else 0.15)
-            halo = cairo.RadialGradient(tip_x, tip_y, 0, tip_x, tip_y, r * 3.2)
-            halo.add_color_stop_rgba(0, *colour, glow)
-            halo.add_color_stop_rgba(1, *colour, 0.0)
-            cr.set_source(halo)
-            cr.arc(tip_x, tip_y, r * 3.2, 0, math.tau)
-            cr.fill()
-        cr.arc(tip_x, tip_y, r, 0, math.tau)
-        cr.set_source_rgb(*OUTLINE)
-        cr.set_line_width(0.9)
-        cr.stroke_preserve()
-        bulb = cairo.RadialGradient(tip_x - 0.4, tip_y - 0.45, 0.1, tip_x, tip_y, r)
-        bulb.add_color_stop_rgb(0, *[min(1.0, c + 0.3) for c in colour])
-        bulb.add_color_stop_rgb(1, *colour)
-        cr.set_source(bulb)
-        cr.fill()
         cr.restore()
 
     def _draw_sheen(self, cr):

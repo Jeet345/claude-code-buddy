@@ -124,28 +124,6 @@ CARD_ARM = 1.0        # secs a new prompt's buttons ignore clicks: it can pop up
 CMD_LINE = 64         # chars per line of a held command on the approval card
 CMD_LINES = 4         # lines of it shown before saying how much is left out
 BADGE = {4: (0.80, 0.58, 0.18), 3: BAR_HIGH, 2: BAR_OK}   # avatar dot by priority
-# The antenna bulb is a status light. None leaves it the body colour, unlit.
-HAT_LIFT = {"build": 5.0, "cook": 8.2}   # grid units of extra stalk per hat costume
-LIGHT_THINK = (0.45, 0.62, 0.95)
-LIGHT_WORK = (0.42, 0.78, 0.45)
-LIGHT_WAIT = (0.97, 0.72, 0.25)
-LIGHT_FAIL = (0.90, 0.32, 0.28)
-
-
-def status_light(s, held=False):
-    """(colour, pulse) for a session's antenna."""
-    if s is None:
-        return None, False
-    if held or s.priority == 4:
-        return LIGHT_WAIT, True
-    if s.priority == 3:
-        return LIGHT_FAIL, False
-    if s.state == "working":
-        return (LIGHT_THINK if s.phase == "thinking" else LIGHT_WORK), False
-    return None, False
-
-
-
 
 
 class Creature:
@@ -1337,13 +1315,6 @@ class Deck(Gtk.Window):
             elif s and s.state == "working" and s.phase == "responding":
                 expression = "writing"
         c.expression = expression
-        held = self.approvals.current() is not None
-        self.rig.light, self.rig.light_pulse = status_light(s, held)
-        # hats sit on top of his head; grow the stalk so the light pokes out
-        wearing = c.costume if c.mode == "working" else None
-        self.rig.antenna_lift = HAT_LIFT.get(wearing, 0.0)
-        if c.mode == "sleep":
-            self.rig.light = None
 
         face = self.rig.face
         if self.card.visible:
@@ -1423,7 +1394,6 @@ class Deck(Gtk.Window):
                           "thinking" if s and s.state == "working" and s.phase == "thinking" else None)
             rig.update(dt, SimpleNamespace(anim=anim, y_off=0.0, expression=expression,
                                            x=self._walk[sid], facing=1))
-            rig.light, rig.light_pulse = status_light(s)
         kid_ids = {k for k, _ in self._sidekick_rects}
         for k in list(self._sidekicks):
             if k not in kid_ids:
