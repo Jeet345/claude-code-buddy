@@ -655,6 +655,25 @@ for f in S.SESSIONS_DIR.glob("*.json"):
     f.unlink()
 
 
+# ------------------------------------------------------- headphones, via the menu
+d = deck(demo=False)
+now = time.time()
+d.put_on_headphones(now)
+d.update_face(now)
+ok("'Headphones on' puts them on straight away", d.rig.listening is True)
+check("and he looks like he is enjoying it", d.creature.expression, "vibing")
+d.creature.set_mode("working")
+d.creature.set_costume("build", now)
+d.update_face(now)
+ok("work takes them off", d.rig.listening is False)
+d.creature.set_mode("idle")
+d.creature.set_costume(None, now)
+d.creature.last_activity = now
+d.update_face(now)
+ok("and they stay off until he has been left alone again", d.rig.listening is False)
+d.hide()
+
+
 # ---------------------------------------------------------------------- report
 print(f"\n{PASSED} passed, {len(FAILED)} failed")
 for f in FAILED:

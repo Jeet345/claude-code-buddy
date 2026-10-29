@@ -1,9 +1,10 @@
 # claude-buddy
 
-A pixel creature who lives at the bottom of your screen and tells you what Claude Code is
-doing. He walks around while you think, puts on a hard hat when Claude runs `Bash`, jumps
-when a task finishes, and falls asleep if you leave him alone — and a line above his head
-says which tool is running on what:
+A little clay creature who lives at the bottom of your screen and tells you what Claude Code
+is doing. He dresses for the job — glasses and a book while Claude reads, a hard hat and a
+wrench for `Bash` — shows Claude's thinking spark over his head, jumps when a task
+finishes, puts headphones on while he waits for you, and falls asleep if you leave him
+alone. A line above his head says which tool is running on what:
 
 ```
    ┌──────────────────────────┐
@@ -23,8 +24,24 @@ Linux only, X11 or XWayland. No dependencies outside the distro packages below.
 
 ![what he does](preview.png)
 
-`preview.png` is generated and is the reference for what each pose means — open it after
-any art change.
+`preview.png` is generated (`python3 build_vector.py --preview`) and is the reference for
+what each pose, face and costume looks like — open it after any art change.
+
+### What he wears
+
+Every outfit is drawn as part of his body, so it squashes, leans and breathes with him, and
+each one does something rather than just sitting there.
+
+| Claude is… | He… |
+|---|---|
+| reading (`Read`, `Grep`, `Glob`) | wears round glasses, reads an open book, eyes running along the lines; turns a page now and then |
+| editing (`Edit`, `Write`) | writes on a notepad, the handwriting appearing line by line |
+| running `Bash` | wears a hard hat and strikes with a wrench, throwing sparks |
+| on the web (`WebFetch`, `WebSearch`) | sweeps a magnifying glass across the view, eyes following it |
+| running subagents (`Task`, `Agent`) | wears a chef's hat and flips a pancake, watching it go up |
+| thinking | shows Claude Code's own spinning spark over his head, after 1.5s |
+| writing a reply | types on a laptop, its screen lighting his face |
+| waiting on you for 20s | puts headphones on and nods along, notes floating up — off again the moment work starts |
 
 ---
 
@@ -252,6 +269,7 @@ he **jumps you to that session's terminal** and waves. Hover him for the readout
 | **Size** | Small / Medium / Large / Huge, applied live and remembered (`--scale` overrides) |
 | Focus terminal | do it now, without clicking — still there when the click is turned off |
 | Wave / Jump! / Nap now | play a state on demand |
+| Headphones on | skip the 20s wait and put them on now |
 | Costume: … | force a costume, for checking the art |
 | Quit | stop the daemon, **and keep him stopped** |
 
@@ -319,6 +337,7 @@ are not looking at.
 | What happened | What he does |
 |---|---|
 | Claude needs permission, or has been waiting on your input | amber `!` on his shoulder, he waves, the bubble holds the message and a running clock |
+| A question dialog is open — Claude's own, or a mod's (commit-guard's approve / task ID) | the same, with the question as the message, until you answer |
 | Still unanswered after 10s | a desktop toast, plus a beep if you turned sound on |
 | Still unanswered after 5 min | one repeat of both, and then it stops |
 | A tool failed | red `!`, no noise — a failed `grep` is a normal part of a session |
@@ -503,8 +522,14 @@ is how both of the last two real bugs were found.
 
 ```
 guy.py           the daemon: window, animation, state machine
-sprites.py       the art, as ASCII grids + palette + anchors  <- edit this
-build_sheet.py   bakes sprites.png / sprites.json / preview.png
+vector.py        draws him: body, clay lighting, weight, feet, thinking spark, laptop
+face.py          eyes, brows, mouth and the expressions between them
+costume.py       every outfit and what he does in it, headphones included  <- new outfits go here
+vector_motion.py springs, blinks and oscillators everything moves on
+vector_art.svg   his body's shapes; vector_props.svg the badges, zzz, puffs, shadows
+build_vector.py  compiles the SVGs to vector_paths.py / vector_prop_paths.py; --preview
+sprites.py       animation timing, tool -> costume table, the remaining small props
+build_sheet.py   the old atlas baker, kept for the pixel-art history
 mod/deck-buddy/  the Claude Code mod: session state, metrics, subagents, prompts
 bridge.py        the socket the mod asks over; held prompts and their answers
 layout.py        where the other sessions' avatars and the sidekicks stand
@@ -521,6 +546,7 @@ test_alerts.py   python3 test_alerts.py      (no display needed)
 test_windows.py  python3 test_windows.py     (live checks skipped without a display)
 test_interactions.py  clicking him at the worst possible moment  (needs a display)
 test_mod.py      bridge over a real socket, layout, mod sessions  (no display needed)
+test_costume.py  every outfit drawn for seconds on end, what puts them on and off  (no display needed)
 check_hooks.py   are the hooks wired, real, and actually firing
 notify.sh        the hook target (hooks mode); steps aside for mod sessions
 install.sh       dependency check, art build, mod install (or hook wiring)
@@ -530,6 +556,9 @@ ROADMAP.md       the plan to turn him into a live Claude Code HUD
 phases/          one document per HUD phase (1-3 built = v1, 4-7 specced)
 ```
 
-To add a new activity: draw a prop grid in `PROPS`, add a `COSTUMES` entry with per-frame
-anchors, map the tool in `TOOL_COSTUME`, rebuild. No draw code, no new branch in the state
-machine. Full procedure in `PLAN.md`.
+To add a new activity: add its name to `NAMES` in `costume.py` with a `_move_<name>` (what
+it does to his arms and gaze each frame) and a `_draw_<name>` (the outfit, in his 40×32
+grid — his head's top edge is y=12, his right hand is `_hand(rig)`), add a `COSTUMES` timing
+entry in `sprites.py`, and map the tool in `TOOL_COSTUME`. No new branch in the state
+machine. `python3 test_costume.py` draws it for seconds on end; `build_vector.py --preview`
+shows it.

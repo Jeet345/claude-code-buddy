@@ -683,54 +683,19 @@ ANIMS = {
 
 # ---------------------------------------------------------------------- costumes
 #
-# A costume is a body animation the daemon already owns, plus props pinned to it
-# frame by frame. `base` names the animation the body comes from and `length` how
-# many frames to take from it (it wraps). `attach` maps a prop name to one anchor
-# per frame - `[col, row]` in this grid's own cell coordinates, or `null` to hide
-# the prop for that frame. The daemon mirrors the anchors when he faces left.
+# A costume is a body animation the daemon already owns: `base` names the
+# animation the body comes from, `length` how many frames to take from it (it
+# wraps), `fps` its rate. What he wears and does is drawn by costume.py, inside
+# his body's own transform, so the props ride every squash, lean and breath.
 #
-# So a new activity is a prop grid plus a list of anchors. No new body art, no
-# daemon changes. This is the charm engine from the reference video, generalised.
-#
-# The two base frames alternate high/low by one row (he breathes), which is why
-# every anchor list alternates by one row too - the props ride the breath.
+# An entry may still carry `attach`: a prop from PROPS pinned on per frame,
+# `[col, row]` in this grid's cells or `null` to hide it. None needs to now.
 COSTUMES = {
-    # Read / Grep / Glob - reading glasses and a book.
-    "read": {
-        "base": "idle", "length": 4, "fps": 4, "loop": True,
-        "attach": {
-            "glasses": [[8, 15], [8, 17], [8, 15], [8, 17]],
-            "book": [[26, 16], [27, 18], [26, 16], [27, 18]],
-        },
-    },
-    # Edit / Write - scribbling with a pencil.
-    "write": {
-        "base": "working", "length": 4, "fps": 8, "loop": True,
-        "attach": {"pencil": [[31, 13], [32, 15], [31, 19], [32, 15]]},
-    },
-    # Bash - hard hat, swinging a wrench.
-    "build": {
-        "base": "working", "length": 4, "fps": 8, "loop": True,
-        "attach": {
-            "hardhat": [[12, 6], [12, 8], [12, 6], [12, 8]],
-            "wrench": [[30, 11], [30, 14], [30, 18], [30, 14]],
-        },
-    },
-    # WebFetch / WebSearch - binoculars, sweeping the horizon.
-    "scan": {
-        "base": "idle", "length": 4, "fps": 5, "loop": True,
-        "attach": {"binoculars": [[11, 14], [9, 16], [13, 14], [15, 16]]},
-    },
-    # Long tasks / subagents - the reference animation: chef hat and a pan flip.
-    "cook": {
-        "base": "idle", "length": 6, "fps": 8, "loop": True,
-        "attach": {
-            "chefhat": [[12, 3], [12, 5], [12, 3], [12, 5], [12, 3], [12, 5]],
-            "pan": [[24, 18], [24, 20], [24, 16], [24, 18], [24, 20], [24, 20]],
-            "food": [[26, 14], [26, 16], [26, 5], [26, -1], [26, 7], [26, 16]],
-            "sparkle": [None, None, [34, 3], [34, -3], None, None],
-        },
-    },
+    "read":  {"base": "idle", "length": 4, "fps": 4, "loop": True},     # Read / Grep / Glob
+    "write": {"base": "working", "length": 4, "fps": 8, "loop": True},  # Edit / Write
+    "build": {"base": "working", "length": 4, "fps": 8, "loop": True},  # Bash
+    "scan":  {"base": "idle", "length": 4, "fps": 5, "loop": True},     # WebFetch / WebSearch
+    "cook":  {"base": "idle", "length": 6, "fps": 8, "loop": True},     # Task / Agent
 }
 
 # Small overlays. `z: back` draws behind the creature, `front` in front of him.
@@ -866,145 +831,6 @@ P........P
 ..........
 P........P
 """,
-        ],
-    },
-    # Steel rims, hollow lenses - his own eyes show through them. The gap between the
-    # rims is 12 cells because that is the gap between his eyes.
-    "glasses": {
-        "fine": True,
-        "frames": [
-            """
-.GGGGGGG.....GGGGGGG....
-GG.....GG...GG.....GG...
-G.......GGGGG.......G...
-G.......G...G.......G...
-GG.....GG...GG.....GG...
-.GGGGGGG.....GGGGGGG....
-"""
-        ],
-    },
-    "book": {
-        "fine": True,
-        "frames": [
-            """
-.BBBBBBBBBBBB.
-BBbbbbbbbbbbBB
-BBbBBBBBBBbbBB
-BBbbbbbbbbbbBB
-BBbBBBBBBbbbBB
-BBbbbbbbbbbbBB
-BBbBBBBBBBbbBB
-BBbbbbbbbbbbBB
-BBbBBBBBbbbbBB
-BBbbbbbbbbbbBB
-.BBBBBBBBBBBB.
-"""
-        ],
-    },
-    "pencil": {
-        "fine": True,
-        "frames": [
-            """
-.YYYY.
-.YYYY.
-.YYYY.
-.YYYY.
-.YYYY.
-.GGGG.
-.YYYY.
-.YYYY.
-..##..
-..#...
-"""
-        ],
-    },
-    "hardhat": {
-        "fine": True,
-        "frames": [
-            """
-.....HHHHHH.....
-...HHHHHHHHHH...
-..HHHHHHHHHHHH..
-..HHHHHHHHHHHH..
-.HHHHHHHHHHHHHH.
-HHHHHHHHHHHHHHHH
-HHHHHHHHHHHHHHHH
-"""
-        ],
-    },
-    "wrench": {
-        "fine": True,
-        "frames": [
-            """
-GG..GG
-GG..GG
-GGGGGG
-GGGGGG
-.GGGG.
-..GG..
-..GG..
-..GG..
-..GG..
-..GG..
-..GG..
-"""
-        ],
-    },
-    "binoculars": {
-        "fine": True,
-        "frames": [
-            """
-GGGGG......GGGGG
-G...G......G...G
-G...G......G...G
-GGGGG......GGGGG
-.GGG.GGGGGG.GGG.
-.GGG.GGGGGG.GGG.
-.GGG........GGG.
-.GGG........GGG.
-..G..........G..
-"""
-        ],
-    },
-    "chefhat": {
-        "fine": True,
-        "frames": [
-            """
-..WWW..WWW....
-.WWWWWWWWWW...
-WWWWWWWWWWWW..
-WWWWWWWWWWWW..
-.WWWWWWWWWW...
-..WWWWWWWW....
-..WWWWWWWW....
-.WWWWWWWWWW...
-.WWWWWWWWWW...
-"""
-        ],
-    },
-    "pan": {
-        "fine": True,
-        "frames": [
-            """
-GG........GG....
-GG........GG....
-GGGGGGGGGGGGGGGG
-GGGGGGGGGGGG....
-.GGGGGGGGGG.....
-..GGGGGGGG......
-"""
-        ],
-    },
-    "food": {
-        "fine": True,
-        "frames": [
-            """
-..FFFF..
-.FFFFFF.
-FFFFFFFF
-.FFFFFF.
-..FFFF..
-"""
         ],
     },
 }

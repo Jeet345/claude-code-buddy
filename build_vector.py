@@ -431,7 +431,7 @@ def preview(out_path="preview.png"):
     S, PAD = 5, 16
     anims = list(sprites.ANIMS)
     props = vector.prop_names()
-    costumes = list(sprites.COSTUMES)
+    costumes = list(sprites.COSTUMES) + ["listen"]
 
     cell_w, cell_h = 40 * S + PAD, 32 * S + PAD + 16
     cols = 7
@@ -499,27 +499,16 @@ def preview(out_path="preview.png"):
     label("costumes", PAD, y, 15, 0.2)
     y += 16
     for i, name in enumerate(costumes):
-        spec = sprites.COSTUMES[name]
         col, row = i % cols, i // cols
         x = PAD + col * cell_w
         cy = y + row * cell_h
+        # costume.py draws the outfit inside the rig, so the rig is all it takes
         rig = vector.Rig(seed=i + 9)
-        fake = Fake(spec["base"])
-        for _ in range(50):
+        fake = Fake("idle" if name == "listen" else name)
+        rig.listening = name == "listen"
+        for _ in range(70):
             rig.update(1.0 / 60.0, fake)
-        back, front = [], []
-        for prop, anchors in spec.get("attach", {}).items():
-            anchor = anchors[0]
-            if not anchor:
-                continue
-            key = vector.prop_key(prop, 0)
-            z = sprites.PROPS[prop].get("z", "front")
-            (back if z == "back" else front).append((key, anchor))
-        for key, (ax, ay) in back:
-            vector.draw_prop(cr, key, x + ax * S, cy + ay * S, S)
         rig.draw(cr, x, cy, 40 * S, 32 * S)
-        for key, (ax, ay) in front:
-            vector.draw_prop(cr, key, x + ax * S, cy + ay * S, S)
         label(name, x, cy + 32 * S + 13)
 
     y += cost_rows * cell_h + 24

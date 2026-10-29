@@ -226,16 +226,7 @@ def prop_size(name):
 #   spin   degrees over one loop, for things that tumble rather than swing
 #   lag    spring stiffness for the prop trailing its anchor; lower is heavier
 PROP_MOTION = {
-    "wrench":  {"swing": 16.0, "lag": 150.0},
-    "pencil":  {"swing": 12.0, "lag": 200.0},
-    "pan":     {"swing": 9.0,  "lag": 120.0},
-    "food":    {"spin": 300.0, "lag": 260.0},
-    "book":    {"swing": 4.0,  "lag": 190.0},
     "sparkle": {"spin": 120.0},
-    "hardhat": {"lag": 240.0},
-    "chefhat": {"lag": 210.0},
-    "glasses": {"lag": 300.0},
-    "binoculars": {"lag": 260.0},
 }
 
 _CATMULL_TIGHT = 0.5

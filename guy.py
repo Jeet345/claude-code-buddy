@@ -1150,7 +1150,7 @@ class Deck(Gtk.Window):
     DEMO = [
         ("idle", 4.0), ("patrol", 6.0), ("wave", 2.0),
         ("read", 5.0), ("write", 5.0), ("build", 5.0), ("scan", 5.0), ("cook", 7.0),
-        ("jump", 3.0), ("alert", 5.0), ("error", 5.0),
+        ("listen", 6.0), ("jump", 3.0), ("alert", 5.0), ("error", 5.0),
         ("idle", 2.0), ("sleep", 4.0), ("idle", 3.0),
     ]
     DEMO_LABELS = {
@@ -1158,6 +1158,13 @@ class Deck(Gtk.Window):
         "build": "Bash pytest -q", "scan": "WebFetch docs.anthropic.com",
         "cook": "Task Explore the repo", "jump": "done",
     }
+
+    def put_on_headphones(self, now):
+        """Skip the wait: idle, as if nobody had needed him for LISTEN_AFTER.
+        Anything that really happens next takes them off as usual."""
+        self.creature.set_costume(None, now)
+        self.creature.set_mode("idle")
+        self.creature.last_activity = now - LISTEN_AFTER - 0.1
 
     def run_demo(self, now):
         if now < self._demo_next:
@@ -1188,6 +1195,8 @@ class Deck(Gtk.Window):
             self.creature.start_patrol(now, hold)
         elif mode == "wave":
             self.creature.cue("wave")
+        elif mode == "listen":
+            self.put_on_headphones(now)
         elif mode in COSTUMES:
             # `COSTUMES`, not `sp.has(mode)`: every costume is an animation but
             # not every animation is a costume, so the loose test caught `idle`
@@ -1829,6 +1838,7 @@ class Deck(Gtk.Window):
             ("Wave", lambda *_: self.creature.cue("wave")),
             ("Jump!", lambda *_: self.creature.set_mode("jump", 45)),
             ("Nap now", lambda *_: self.creature.set_mode("sleep")),
+            ("Headphones on", lambda *_: self.put_on_headphones(time.time())),
         ]
         items += [
             (f"Costume: {name}", lambda _i, n=name: (
