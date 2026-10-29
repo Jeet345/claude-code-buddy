@@ -26,7 +26,19 @@ die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 # Pillow and GdkPixbuf used to be required here. Neither is any more: the art is
 # vector and the daemon draws it with cairo, so nothing loads a PNG. Demanding
 # them would fail an install on a machine that has everything it actually needs.
-$PY - <<'EOF' || die "dependencies missing - see README.md"
+# Name the packages for this distro instead of just pointing at the README.
+deps_hint() {
+    local id=""
+    [ -r /etc/os-release ] && id="$(. /etc/os-release; echo "${ID:-} ${ID_LIKE:-}")"
+    case "$id" in
+        *debian*|*ubuntu*) say "  try: sudo apt install -y python3-gi python3-gi-cairo gir1.2-gtk-3.0" ;;
+        *fedora*|*rhel*)   say "  try: sudo dnf install python3-gobject python3-cairo-gobject gtk3" ;;
+        *arch*)            say "  try: sudo pacman -S python-gobject python-cairo gtk3" ;;
+        *suse*)            say "  try: sudo zypper install python3-gobject-Gdk typelib-1_0-Gtk-3_0 python3-cairo" ;;
+        *)                 say "  see README.md -> Requirements for your distro's package names" ;;
+    esac
+}
+$PY - <<'EOF' || { deps_hint; die "dependencies missing"; }
 import sys
 try:
     import gi
@@ -58,6 +70,8 @@ print("import OK  guy.py and its modules load against these versions")
 EOF
 
 [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] || say "warn: no DISPLAY - he cannot draw over ssh"
+# The mod and notify.sh both start him with `setsid --fork` (util-linux 2.31+).
+setsid --fork true >/dev/null 2>&1 || say "warn: 'setsid --fork' is not available - he will not start on his own"
 if [ "${XDG_SESSION_TYPE:-}" = "wayland" ] && ! command -v Xwayland >/dev/null 2>&1; then
     say "warn: Wayland session and no Xwayland found - install it or he will not position"
 fi
@@ -180,6 +194,8 @@ if [ -r "$D/daemon.pid" ] && kill -0 "$(cat "$D/daemon.pid")" 2>/dev/null; then
 else
     say "warn: daemon did not start - read $D/guy.crash.log, or run '$PY $D/guy.py --no-log'"
 fi
+say "Keep this folder where it is: the mod and hooks run him from $D."
+say "If you move it, run ./install.sh again from the new place."
 if [ "$WIRE" = mod ]; then
     say "Restart Claude Code (or run /reload-plugins) to load the mod. /buddy shows its status."
     say "Answering prompts from the buddy is off until you turn it on: /buddy approve on,"

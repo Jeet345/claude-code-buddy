@@ -60,7 +60,7 @@ sudo apt install -y python3-gi python3-gi-cairo gir1.2-gtk-3.0
 # Fedora
 sudo dnf install python3-gobject python3-cairo-gobject gtk3
 # Arch
-sudo pacman -S python-gobject python-cairo gtk3 python-pillow
+sudo pacman -S python-gobject python-cairo gtk3
 # openSUSE
 sudo zypper install python3-gobject-Gdk typelib-1_0-Gtk-3_0 python3-cairo
 ```

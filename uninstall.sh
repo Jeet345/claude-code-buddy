@@ -31,6 +31,8 @@ done
 
 say() { printf '%s\n' "$*"; }
 run() { if [ "$dry" = 1 ]; then printf '  would: %s\n' "$*"; else "$@"; fi; }
+# Same, with the command's own output silenced - but never the dry run's line.
+quiet() { if [ "$dry" = 1 ]; then printf '  would: %s\n' "$*"; else "$@" >/dev/null 2>&1; fi; }
 # Summary lines are written in the past tense, so a dry run must not print them:
 # the `would:` line above each one has already said it, and saying both makes the
 # rehearsal read like the real thing.
@@ -72,13 +74,20 @@ fi
 # ---- 1b. the mod -------------------------------------------------------------
 # install.sh adds this folder as the `deck-guy` marketplace and installs
 # deck-buddy from it. Remove both; either may already be gone.
-if command -v claude >/dev/null 2>&1 &&
-   claude plugin list 2>/dev/null | grep -q "deck-buddy@deck-guy"; then
-    run claude plugin uninstall deck-buddy@deck-guy >/dev/null 2>&1
-    run claude plugin marketplace remove deck-guy >/dev/null 2>&1
-    done_say "mod       deck-buddy uninstalled"
+# Checked separately: a mod removed by hand leaves the marketplace behind.
+if command -v claude >/dev/null 2>&1; then
+    if claude plugin list 2>/dev/null | grep -q "deck-buddy@deck-guy"; then
+        quiet claude plugin uninstall deck-buddy@deck-guy
+        done_say "mod       deck-buddy uninstalled"
+    else
+        say "mod       not installed"
+    fi
+    if claude plugin marketplace list 2>/dev/null | grep -q "deck-guy"; then
+        quiet claude plugin marketplace remove deck-guy
+        done_say "market    deck-guy removed"
+    fi
 else
-    say "mod       not installed"
+    say "mod       no claude CLI on PATH - remove it with: claude plugin uninstall deck-buddy@deck-guy"
 fi
 
 # ---- 2. unwire the hooks ---------------------------------------------------
@@ -166,5 +175,5 @@ else
 fi
 
 say ""
-say "Restart Claude Code so it stops loading the hooks."
+say "Restart Claude Code (or run /reload-plugins) so it stops loading the mod and hooks."
 say "The folder is still at $D - delete it yourself when you are done with it."
