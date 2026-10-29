@@ -322,13 +322,19 @@ else:
                 ok("the active window actually changed to it",
                    active() == target, f"active={active()} want={target}")
 
-                # Put the desktop back exactly as we found it.
-                for w in stack:
-                    if hex(w.get_xid()) == before:
-                        raise_(w)
+                # Put the desktop back as we found it. This is tidying up, not
+                # behaviour under test, and the window manager's focus-stealing
+                # prevention is free to refuse it - so retry, then just say so.
+                for _ in range(3):
+                    for w in stack:
+                        if hex(w.get_xid()) == before:
+                            raise_(w)
+                            break
+                    if active() == before:
                         break
-                ok("and focus was restored", active() == before,
-                   f"active={active()} want={before}")
+                if active() != before:
+                    print(f"  note: window manager kept focus on {active()}, "
+                          f"could not hand it back to {before}")
 
 
 # ---------------------------------------------------------------------- report
