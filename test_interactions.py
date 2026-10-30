@@ -674,6 +674,82 @@ ok("and they stay off until he has been left alone again", d.rig.listening is Fa
 d.hide()
 
 
+# ------------------------------------------- the last terminal, after it ended
+from types import SimpleNamespace as _NS  # noqa: E402
+from unittest.mock import patch as _patch  # noqa: E402
+
+guy.LAST_TERMINAL.unlink(missing_ok=True)
+d = deck(demo=True)
+gone = _NS(id="sess-1234", pids=[os.getpid()], project="buddy", cwd="/tmp/buddy")
+d._remember_terminal(gone)
+ok("the featured session's terminal is written down", guy.LAST_TERMINAL.exists())
+stamp = guy.LAST_TERMINAL.stat().st_mtime_ns
+d._remember_terminal(gone)
+check("a heartbeat with nothing new does not rewrite it",
+      guy.LAST_TERMINAL.stat().st_mtime_ns, stamp)
+calls = []
+
+
+def remembered(xid, stamped, project=""):
+    calls.append((xid, stamped, project))
+    return guy.windows.Result(True, "focused", "term", 77)
+
+
+with _patch.object(guy.windows, "focus_remembered", side_effect=remembered):
+    r = d.focus_terminal()
+ok("with no live session a click goes back to the last terminal", r.ok, r.reason)
+check("using the pids and start times it saved",
+      calls[-1][1], [(os.getpid(), guy.windows.started(os.getpid()))])
+ok("and says nothing about it: a click does not open the bubble", not d._say[0], d._say[0])
+d.hide()
+
+d = deck(demo=True)
+ok("a restarted daemon still remembers it",
+   d._last_terminal and d._last_terminal["id"] == "sess-1234")
+with _patch.object(guy.windows, "focus_remembered",
+                   return_value=guy.windows.Result(False, "that terminal has closed")):
+    r = d.focus_terminal()
+ok("a closed terminal is a clean failure", not r.ok)
+ok("that still copies the cwd and says why", "closed" in d._say[0], d._say[0])
+guy.LAST_TERMINAL.unlink()
+d.hide()
+d = deck(demo=True)
+r = d.focus_terminal()
+ok("with nothing remembered he says there is no session", not r.ok and "no session" in d._say[0])
+d.hide()
+
+
+# ------------------------------------------- the hover panel, not on press or drag
+d = deck(demo=True)
+now = time.time()
+bx, by, bw, bh = d.creature.bbox(d.ground_y)
+at = _NS(button=1, x=bx + bw / 2, y=by + bh / 2, x_root=500, y_root=500)
+d.on_motion(None, at)
+now = tick(d, now, 2, hover=True)
+ok("hovering him opens the panel", d.panel.visible)
+d.on_press(None, at)
+now = tick(d, now, 2, hover=True)
+ok("pressing on him closes it", not d.panel.visible)
+d.on_motion(None, _NS(button=1, x=at.x + 60, y=at.y, x_root=560, y_root=500))
+d.on_leave(None, None)                      # pointer slips off mid-drag
+now = tick(d, now, 2, hover=True)
+ok("dragging him keeps it closed", not d.panel.visible)
+d.on_release(None, _NS(button=1, x=at.x + 60, y=at.y, x_root=560, y_root=500))
+d.on_motion(None, at)
+now = tick(d, now, 2, hover=True)
+ok("and so does staying on him after letting go", not d.panel.visible)
+d.on_leave(None, None)
+d.on_motion(None, at)
+now = tick(d, now, 2, hover=True)
+ok("leaving and coming back opens it again", d.panel.visible)
+d.on_press(None, at)
+d.on_release(None, at)
+d.on_motion(None, at)
+now = tick(d, now, 2, hover=True)
+ok("a plain click closes it too", not d.panel.visible)
+d.hide()
+
+
 # ---------------------------------------------------------------------- report
 print(f"\n{PASSED} passed, {len(FAILED)} failed")
 for f in FAILED:

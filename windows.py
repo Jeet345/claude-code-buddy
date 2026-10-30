@@ -251,6 +251,49 @@ def ancestry(pid=None, depth=MAX_DEPTH):
     return chain
 
 
+def started(pid):
+    """When this pid started, in clock ticks since boot, or None if it is gone.
+
+    A pid alone is not an identity once time has passed: the kernel hands the
+    number out again. Paired with its start time it is, which is what lets a
+    remembered terminal be trusted hours later.
+    """
+    try:
+        with open(f"/proc/{int(pid)}/stat") as fh:
+            stat = fh.read()
+        return int(stat[stat.rfind(")") + 2:].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def still_running(stamped):
+    """The pids from [(pid, start), ...] that are still the same processes."""
+    return [pid for pid, start in stamped if start is not None and started(pid) == start]
+
+
+def focus_remembered(xid, stamped, project=""):
+    """Raise a terminal remembered from a session that has since ended.
+
+    The window it was last raised by, if that still exists; otherwise whichever
+    of its processes are still the same ones - the terminal emulator usually
+    outlives the claude process that ran in it.
+    """
+    for w in _stack() if xid else ():
+        if w.get_xid() == xid:
+            try:
+                w.focus(0)
+                display = Gdk.Display.get_default()
+                if display is not None:
+                    display.flush()
+                return Result(True, "focused", "", xid)
+            except Exception:
+                break
+    pids = still_running(stamped)
+    if not pids:
+        return Result(False, "that terminal has closed")
+    return focus(pids, project)
+
+
 def find(pids, project=""):
     """The window to raise for this session, or `None`.
 

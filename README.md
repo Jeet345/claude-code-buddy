@@ -278,6 +278,10 @@ he **jumps you to that session's terminal** and waves. Hover him for the readout
 | Costume: … | force a costume, for checking the art |
 | Quit | stop the daemon, **and keep him stopped** |
 
+With no session running (it finished, he is napping, or the daemon restarted) the click
+and **Focus terminal** go back to the terminal the last session ran in, as long as that
+window is still open. It is kept in `~/.deck-guy/last_terminal.json`.
+
 While he explores the border, other sessions and subagents stay on the floor near his
 home spot. Text stays upright and opens toward the inside of the screen, with the speech
 bubble's tail pointing back at him. Saved edge positions adapt to changes in his size or

@@ -86,6 +86,7 @@ unix_signal_add = _unix_signal_add()
 
 HERE = Path(__file__).parent
 POS = HERE / "pos.json"
+LAST_TERMINAL = SESSIONS_ROOT / "last_terminal.json"   # where the last session ran
 PREFS = HERE / "prefs.json"
 PIDFILE = HERE / "daemon.pid"
 LOGFILE = HERE / "guy.log"
@@ -954,6 +955,7 @@ class Deck(Gtk.Window):
         self.panel = Panel(self.sp.scale)
         self._bubble_until = 0.0
         self._hover = False
+        self._quiet_hover = False     # set by a press, cleared when the pointer leaves
         prefs = self._load_prefs()
         # Turning the bubble off leaves the hover panel working, so the
         # information is still one hover away rather than gone.
@@ -1025,6 +1027,7 @@ class Deck(Gtk.Window):
 
         # No polling: notify.sh writes a file per session and the store watches
         # the directory. --demo drives him from the script below instead.
+        self._last_terminal = self._load_last_terminal()
         self.store = None
         if not args.demo:
             self.store = SessionStore(on_change=self.on_sessions).start()
@@ -1174,6 +1177,7 @@ class Deck(Gtk.Window):
             if not (self.creature.slumped and self.alerts.pending()):
                 self.creature.set_mode("idle")
             return
+        self._remember_terminal(s)
         now = time.time()
         self.creature.last_activity = now
         self.alerts.clear_local()          # this session is alive after all
@@ -1399,7 +1403,7 @@ class Deck(Gtk.Window):
         if now > self._bubble_until + BUBBLE_FADE:
             self.bubble.set("")
 
-        if not (self._hover or hovered):
+        if not (self._hover or hovered) or self._quiet_hover:
             self.panel.set([])
         elif s:
             rows = [("project", s.project or "-"),
@@ -2161,16 +2165,78 @@ class Deck(Gtk.Window):
         """
         s = session or (self.store.featured() if self.store else None)
         if s is None:
-            self.say("no session to jump to")
-            return windows.Result(False, "no session")
+            return self._focus_last_terminal()
 
         r = windows.focus(s.pids, project=s.project)
         if r.ok:
             print(f"focused terminal {r.xid:#x} {r.name!r} "
                   f"for {s.id[:8]} via pids {s.pids}", flush=True)
+            self._remember_terminal(s, r.xid)
             return r
+        return self._focus_failed(s, r)
 
-        # Could not raise it. Hand over the one thing that is still useful.
+    def _remember_terminal(self, s, xid=None):
+        """Note where this session runs, so a click can still go there after it
+        has ended, he has napped, or the daemon has restarted.
+
+        Written only when something changed - the mod rewrites session files
+        every 15s as a heartbeat, and that is no reason to touch the disk.
+        """
+        if not s.pids:
+            return
+        last = self._last_terminal or {}
+        key = (s.id, tuple(s.pids))
+        if key == last.get("_key") and (xid is None or xid == last.get("xid")):
+            return
+        same = last.get("id") == s.id
+        if xid is None and key != last.get("_key"):
+            # Once per session, not per heartbeat: one terminal process can own
+            # many windows (gnome-terminal does), and after the session ends its
+            # pid alone can no longer say which of them it was.
+            try:
+                hit = windows.find(s.pids, s.project)
+                xid = hit[0].get_xid() if hit else None
+            except Exception:
+                xid = None
+        self._last_terminal = {
+            "_key": key, "id": s.id, "project": s.project or "", "cwd": s.cwd or "",
+            "pids": [(pid, windows.started(pid)) for pid in s.pids],
+            "xid": xid or (last.get("xid") if same else None),
+        }
+        try:
+            LAST_TERMINAL.parent.mkdir(parents=True, exist_ok=True)
+            LAST_TERMINAL.write_text(json.dumps(
+                {k: v for k, v in self._last_terminal.items() if k != "_key"}))
+        except OSError:
+            pass
+
+    def _load_last_terminal(self):
+        try:
+            data = json.loads(LAST_TERMINAL.read_text())
+            if not isinstance(data, dict):
+                return None
+            data["pids"] = [(int(p), int(t) if t is not None else None)
+                            for p, t in data.get("pids", [])]
+            return data
+        except (OSError, ValueError, TypeError, AttributeError):
+            return None
+
+    def _focus_last_terminal(self):
+        """No live session: go back to the terminal the last one ran in."""
+        last = self._last_terminal
+        if not last:
+            self.say("no session to jump to")
+            return windows.Result(False, "no session")
+        r = windows.focus_remembered(last.get("xid"), last["pids"], last.get("project", ""))
+        if r.ok:
+            print(f"focused last terminal {r.xid:#x} for ended session "
+                  f"{last.get('id', '')[:8]}", flush=True)
+            return r
+        return self._focus_failed(SimpleNamespace(id=last.get("id", ""), cwd=last.get("cwd", ""),
+                                                  pids=[p for p, _t in last["pids"]]), r)
+
+    def _focus_failed(self, s, r):
+        """Could not raise it. Hand over the one thing that is still useful."""
         copied = False
         if s.cwd:
             try:
@@ -2221,6 +2287,9 @@ class Deck(Gtk.Window):
             self._press_btn = "avatar:" + self._avatar_at(ev.x, ev.y)
             return True
         if ev.button == 1:
+            # A click or a drag is not a request to read about him: the hover
+            # panel stays down until the pointer has left him and come back.
+            self._quiet_hover = True
             c = self.creature
             _bx, by, _bw, bh = c.body_bbox(self.ground_y)
             self._drag = (ev.x_root, getattr(ev, "y_root", 0.0), c.x, by + bh / 2)
@@ -2259,6 +2328,8 @@ class Deck(Gtk.Window):
         return True
 
     def on_leave(self, _w, _ev):
+        if self._drag is None:
+            self._quiet_hover = False
         self._hover = False
         self._hover_sid = None
         self._card_hot = ""

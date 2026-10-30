@@ -250,6 +250,28 @@ try:
     ok("a window that refuses is a clean failure", not r.ok)
     ok("and the reason carries the error", "could not raise" in r.reason, r.reason)
     check("and it still says which window", r.name, "stubborn")
+
+    # ---- a terminal remembered from a session that has ended
+    me = os.getpid()
+    ok("a running pid has a start time", windows.started(me) is not None)
+    check("a pid that is gone has none", windows.started(2 ** 22 + 7), None)
+    check("a pid counts as the same process only with its start time",
+          windows.still_running([(me, windows.started(me)), (me, -1), (2 ** 22 + 7, 5)]),
+          [me])
+
+    wins = fake({11: (100, "terminal"), 22: (200, "editor")}, [11, 22])
+    r = windows.focus_remembered(22, [])
+    ok("the remembered window is raised while it still exists", r.ok, r.reason)
+    check("and it is that window", (r.xid, wins[22].focused), (22, 1))
+
+    real_started = windows.started
+    windows.started = lambda pid: {100: 555}.get(pid)
+    r = windows.focus_remembered(99, [(100, 555)])
+    ok("a closed window falls back to the terminal process", r.ok and r.xid == 11, r.reason)
+    r = windows.focus_remembered(99, [(100, 1)])
+    ok("a reused pid is not mistaken for the terminal", not r.ok)
+    ok("and it says the terminal has closed", "closed" in r.reason, r.reason)
+    windows.started = real_started
 finally:
     windows._backend, windows._stack = real_backend, real_stack
 
