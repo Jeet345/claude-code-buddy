@@ -255,7 +255,9 @@ GTK's linking. `notify.sh` always strips them.
 | `--no-log` | print to the terminal instead of `guy.log` |
 | `--no-shape` | skip click-through, for debugging where the window actually is |
 
-Drag him with the mouse to move him; his home position persists in `pos.json`. Click him and
+Drag him with the mouse to move him. In Whole border mode, drag in any direction and
+release to stick to the nearest edge; the edge and position persist in `pos.json`.
+Off and Along the bottom keep horizontal dragging. Click him and
 he **jumps you to that session's terminal** and waves. Hover him for the readout panel.
 **Right-click him for the menu**, which has:
 
@@ -267,13 +269,31 @@ he **jumps you to that session's terminal** and waves. Hover him for the readout
 | **Click jumps to terminal** | what a left-click does. On by default, remembered |
 | **Answer prompts from buddy** | hold permission prompts on him while you are elsewhere — off by default, remembered |
 | **Size** | Small / Medium / Large / Huge, applied live and remembered (`--scale` overrides) |
-| **Roam** | Off (bottom strip only) / Along the bottom / Whole border. With it on, some idle walks become strolls that leave home and wrap off one side of the screen onto the other |
+| **Roam** | Off (bottom strip only) / Along the bottom (wrap between screen edges) / Whole border (climb walls, turn smoothly around corners and walk upside down on the ceiling). Some idle walks become longer strolls; work and prompts bring him back to the floor. Remembered between runs |
 | Focus terminal | do it now, without clicking — still there when the click is turned off |
 | Wave / Jump! / Nap now | play a state on demand |
 | Headphones on | skip the 20s wait and put them on now |
-| Go for a stroll | start a stroll now instead of waiting for one |
+| Go for a stroll | start a stroll now; in Whole border mode, walk one complete lap |
+| Peek at edge / Slide down wall / Drop from ceiling | in Whole border mode, try the behaviour for his current edge; shown while idle |
 | Costume: … | force a costume, for checking the art |
 | Quit | stop the daemon, **and keep him stopped** |
+
+While he explores the border, other sessions and subagents stay on the floor near his
+home spot. Text stays upright and opens toward the inside of the screen, with the speech
+bubble's tail pointing back at him. Saved edge positions adapt to changes in his size or
+screen resolution. Work arriving during a drag is preserved and brings him to the floor
+after release; the dragged edge is still remembered for the next restart.
+
+In Whole border mode he occasionally peeks half out of a side edge, slides down a wall,
+or lets go of the ceiling. Slides roll through the lower corner; drops end with a squash
+and dust. These only happen while idle and stop when work or a prompt arrives. You can
+also start the appropriate behaviour from the right-click menu. Choose Nap now while he
+is on the ceiling for a hanging nap, with a gentle sway and zzz drifting down.
+
+The buddy hides while the active X11 application is full-screen, then returns when it
+leaves full-screen. Held approval cards go back to the terminal while he is hidden. This
+guard needs `xprop` (`x11-utils` on Debian/Ubuntu); native Wayland windows that the
+compositor does not expose to XWayland cannot be detected.
 
 Turning the bubble off leaves the hover panel working, so the same information is one hover
 away rather than gone.
@@ -535,6 +555,7 @@ build_sheet.py   the old atlas baker, kept for the pixel-art history
 mod/deck-buddy/  the Claude Code mod: session state, metrics, subagents, prompts
 bridge.py        the socket the mod asks over; held prompts and their answers
 layout.py        where the other sessions' avatars and the sidekicks stand
+roam.py          rounded border positions and body rotation, independent of GTK
 sessions.py      live sessions: parse, reap, work out what to call the target
 bubble.py        the speech bubble, hover panel and context meter
 transcript.py    tails the transcript JSONL for tokens, context and cost (hook sessions)
@@ -549,13 +570,14 @@ test_windows.py  python3 test_windows.py     (live checks skipped without a disp
 test_interactions.py  clicking him at the worst possible moment  (needs a display)
 test_mod.py      bridge over a real socket, layout, mod sessions  (no display needed)
 test_costume.py  every outfit drawn for seconds on end, what puts them on and off  (no display needed)
+test_roam.py     wraps, border laps, corners, falls, edge projection and saved positions; GTK drag/readout checks with a display
 check_hooks.py   are the hooks wired, real, and actually firing
 notify.sh        the hook target (hooks mode); steps aside for mod sessions
 install.sh       dependency check, art build, mod install (or hook wiring)
 uninstall.sh     stop him, unwire the hooks, clear state  (--purge, --dry-run)
 PLAN.md          how the pet is built and why, plus every gotcha hit
 ROADMAP.md       the plan to turn him into a live Claude Code HUD
-phases/          one document per HUD phase (1-3 built = v1, 4-7 specced)
+phases/          HUD and roaming plans, with current status in phases/README.md
 ```
 
 To add a new activity: add its name to `NAMES` in `costume.py` with a `_move_<name>` (what

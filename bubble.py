@@ -207,19 +207,22 @@ class _Readout:
         self._build()
         return self._size
 
-    def draw(self, cr, centre_x, bottom_y, win_w, alpha=1.0, scale=1.0):
-        """`scale` grows it from its bottom centre - the pop-in on arrival.
+    def draw(self, cr, centre_x, bottom_y, win_w, alpha=1.0, scale=1.0, origin=None):
+        """`scale` grows it from the side facing him - the pop-in on arrival.
         The returned rect is the resting one; the caller pads its damage."""
         if not self.visible or alpha <= 0.01:
             return None
         surf = self._build()
         w, h = surf.get_width(), surf.get_height()
-        x, y = place(centre_x, bottom_y, w, h, win_w)
+        x, y = origin if origin is not None else place(centre_x, bottom_y, w, h, win_w)
         cr.save()
         if abs(scale - 1.0) > 0.002:
-            cr.translate(x + w / 2, y + h)
+            tail = getattr(self, "tail", "bottom")
+            ax = x if tail == "left" else x + w if tail == "right" else x + w / 2
+            ay = y if tail == "top" else y + h / 2 if tail in ("left", "right") else y + h
+            cr.translate(ax, ay)
             cr.scale(scale, scale)
-            cr.translate(-(x + w / 2), -(y + h))
+            cr.translate(-ax, -ay)
         cr.set_source_surface(surf, x, y)
         cr.paint_with_alpha(alpha)
         cr.restore()
@@ -227,12 +230,14 @@ class _Readout:
 
 
 class Bubble(_Readout):
-    """One line above his head. Rebuilt only when the text changes."""
+    """One upright line with a tail toward him, whichever edge he occupies."""
 
     def __init__(self, scale):
         super().__init__(scale)
         self.text = ""
         self.timer = ""
+        self.tail = "bottom"
+        self.tail_at = None
 
     def set(self, text, timer=""):
         self.text, self.timer = text or "", timer or ""
@@ -242,16 +247,46 @@ class Bubble(_Readout):
         return bool(self.text)
 
     def _build(self):
-        return self._cached((self.text, self.timer, self.scale), self._render)
+        return self._cached((self.text, self.timer, self.scale, self.tail, self.tail_at), self._render)
 
     def _render(self):
         px = self.scale
         tw, sw = _width(self.text), _width(self.timer)
         w = _round_up(PAD * 2 + INSET * 2 + tw + (GAP + sw if self.timer else 0), px)
         h = _round_up(PAD * 2 + TEXT_H + SHADOW, px)
-        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h + px * TAIL_ROWS)
+        tail = px * TAIL_ROWS
+        side = self.tail
+        horizontal = side in ("left", "right")
+        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, w + (tail if horizontal else 0),
+                                  h + (0 if horizontal else tail))
         cr = cairo.Context(surf)
-        _frame(cr, w, h, px)
+        cr.translate(tail if side == "left" else 0, tail if side == "top" else 0)
+        _frame(cr, w, h, px, tail=False)
+        length = h - SHADOW if horizontal else w
+        at = max(RADIUS + 10, min(length - RADIUS - 10,
+                 self.tail_at if self.tail_at is not None else length / 2))
+        # Draw only the pointer in a local frame; the lettering stays upright.
+        cr.save()
+        if side == "bottom":
+            cr.translate(at, h - SHADOW - 1)
+        elif side == "top":
+            cr.translate(at, 2)
+            cr.rotate(math.pi)
+        elif side == "left":
+            cr.translate(INSET + 1, at)
+            cr.rotate(math.pi / 2)
+        else:
+            cr.translate(w - INSET - 1, at)
+            cr.rotate(-math.pi / 2)
+        cr.move_to(-9, -1)
+        cr.curve_to(-4, tail * 0.35, -2, tail * 0.75, 0, tail)
+        cr.curve_to(2, tail * 0.6, 6, tail * 0.25, 10, -1)
+        cr.set_source_rgb(*PAPER)
+        cr.fill_preserve()
+        cr.set_source_rgba(*EDGE, 0.55)
+        cr.set_line_width(1)
+        cr.stroke()
+        cr.restore()
         cr.translate(INSET, 0)
         _font(cr)
         base = (h - SHADOW + ASCENT - DESCENT) / 2

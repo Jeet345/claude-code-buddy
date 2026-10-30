@@ -520,6 +520,18 @@ class Rig:
             self.offsets[gesture.param] = (self.offsets.get(gesture.param, 0.0)
                                            + gesture.value(self.t))
 
+        if getattr(creature, "hanging_sleep", False):
+            self.offsets["bob"] = 0.0
+            self.offsets["tilt"] = 1.5 * math.sin(self.t * 0.9)
+        elif getattr(creature, "roam_action", None) == "slide":
+            self.offsets["arm_l_raise"] = self.offsets["arm_r_raise"] = 0.9
+            self.offsets["tilt"] = 4.0
+        elif getattr(creature, "roam_action", None) == "drop":
+            self.offsets["stretch"] = -0.08
+            self.offsets["arm_l_raise"] = self.offsets["arm_r_raise"] = 0.6
+        elif getattr(creature, "_dropping", False):
+            self.offsets["arm_l_raise"] = self.offsets["arm_r_raise"] = 1.1
+
         if self.writing > 0.3:
             # typing: quick alternating taps, out of phase hand to hand
             tap = self.writing * 0.55
@@ -549,9 +561,19 @@ class Rig:
 
     def _motion_extras(self, dt, creature):
         """Weight, jump anticipation and landing, particles, idle fidgets."""
+        landings = getattr(creature, "landings", 0)
+        if landings != getattr(self, "_landings", 0):
+            self._landings = landings
+            impact = getattr(creature, "impact", 0.5)
+            self.p["stretch"].nudge(-4.5 * impact)
+            self.jiggle.nudge(14.0 * impact)
+            self._dust()
         x = float(getattr(creature, "x", 0.0) or 0.0)
         vx = (x - self._last_x) / dt if (self._last_x is not None and dt > 0) else 0.0
         self._last_x = x
+        border_velocity = getattr(creature, "border_velocity", None)
+        if border_velocity is not None:
+            vx = border_velocity  # speed along a wall, not across the screen
         if abs(vx) < 400.0:                 # a teleport is not a walk
             self._vx += (vx - self._vx) * min(1.0, dt * 10.0)
         facing = getattr(creature, "facing", 1) or 1

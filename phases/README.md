@@ -16,6 +16,7 @@ deferred. If a phase cannot state its acceptance criteria, it is not ready to st
 | 5 | [`phase-5-control.md`](phase-5-control.md) — act without switching to the terminal | **5a built** 2026-10-13 via the mod; 5b-5e not started |
 | 6 | [`phase-6-history.md`](phase-6-history.md) — timeline, scrollback, undo shelf | not started |
 | 7 | [`phase-7-ambient.md`](phase-7-ambient.md) — git, CI, budget, personality | not started |
+| 8 | [`phase-8-roaming.md`](phase-8-roaming.md) — screen-border roaming | steps 1–5 built 2026-10-30; optional followers and multiple monitors pending |
 
 **v1 = phases 1 + 2 + 3, and v1 is built.** Nothing in those depends on unsupported
 behaviour, and nothing in them can break a running Claude Code session.

@@ -46,12 +46,13 @@ import costume  # noqa: E402
 from sprites import COSTUMES, TOOL_COSTUME  # noqa: E402
 
 import layout  # noqa: E402
+import roam  # noqa: E402
 import prices  # noqa: E402
 import windows  # noqa: E402
 from alerts import Alerts  # noqa: E402
 from bridge import Approvals, Bridge  # noqa: E402
 from bubble import (HIGH, WARN, BAR_HIGH, BAR_OK, Bubble, Card, Meter, Panel,  # noqa: E402
-                    bar_colour, place)
+                    bar_colour)
 from vector_motion import Spring  # noqa: E402
 from sessions import ROOT as SESSIONS_ROOT, SessionStore, clock, describe, elide  # noqa: E402
 
@@ -106,6 +107,7 @@ MODE_HZ = {
 }
 PATROL_RANGE = 150    # px he will wander either side of home
 PATROL_SPEED = 45     # px per second
+BORDER_SPEED = 80     # px per second along walls and ceiling: a full lap in about a minute
 GROUND_MARGIN = 6     # px between his feet and the bottom of the screen
 EDGE_MARGIN = 4       # px of screen he will not walk into
 PUFF_SECS = 0.36      # length of the burst that hides a costume change
@@ -119,6 +121,10 @@ ROAM_MODES = {"Off": "off", "Along the bottom": "floor", "Whole border": "border
 STROLL_CHANCE = 0.3   # of his idle walks, how many are strolls that leave home
 STROLL_SECS = (8.0, 18.0)
 SETTLE_SPEED = 120    # px/s he walks back on screen if work catches him mid-wrap
+TRICK_CHANCE = 0.22  # occasional idle decisions become a border trick
+SLIDE_SPEED = 180    # px/s, reached gradually while sliding down a wall
+FULLSCREEN_POLL = 1.0         # secs between full-screen checks while awake
+FULLSCREEN_POLL_ASLEEP = 4.0  # and while he sleeps
 DEFAULT_SCALE = 4
 WALK_RATE = 2.2       # how quickly avatars and sidekicks close on their spot, 1/s
 AVATAR_DIV = 2        # other sessions stand beside him at half his size
@@ -152,6 +158,19 @@ class Creature:
         self.roam = "off"         # Deck's Roam setting: off / floor / border
         self.wrap_w = None        # window width; a stroll off one side enters the other
         self._stroll = False
+        self.border = None
+        self.border_s = None
+        self.border_y = None
+        self.angle = 0.0
+        self._fall_speed = 0.0
+        self._dropping = False
+        self._join_border = False
+        self.dragging = False
+        self.roam_action = None
+        self.roam_phase = ""
+        self._roam_t = 0.0
+        self.landings = 0
+        self.impact = 0.0
 
         self.mode = "idle"
         self.costume = None
@@ -177,6 +196,8 @@ class Creature:
 
     def _work_anim(self):
         """Costume animation if we have art for it, plain busy loop otherwise."""
+        if self._dropping:
+            return "idle"
         if self.costume and self.sp.has(self.costume):
             return self.costume
         return "working"
@@ -195,14 +216,236 @@ class Creature:
     def clamp(self, x):
         return min(max(x, self.min_x), self.max_x)
 
+    def body_bbox(self, ground_y):
+        """Unrotated drawing box; bbox encloses its rotated result."""
+        cy = (self.border_y if self.border_y is not None
+              else ground_y - self.sp.h / 2) - self.y_off
+        return self.x - self.sp.w / 2, cy - self.sp.h / 2, self.sp.w, self.sp.h
+
     def bbox(self, ground_y):
-        """Where his body is right now, as (x, y, w, h) in window coordinates."""
-        return (
-            int(self.x - self.sp.w / 2),
-            int(ground_y - self.sp.h - self.y_off),
-            self.sp.w,
-            self.sp.h,
-        )
+        if self.border_y is None:
+            return (int(self.x - self.sp.w / 2), int(ground_y - self.sp.h - self.y_off),
+                    self.sp.w, self.sp.h)
+        x, y, w, h = self.body_bbox(ground_y)
+        rw = abs(math.cos(self.angle)) * w + abs(math.sin(self.angle)) * h
+        rh = abs(math.sin(self.angle)) * w + abs(math.cos(self.angle)) * h
+        left, top = math.floor(x + w / 2 - rw / 2), math.floor(y + h / 2 - rh / 2)
+        return left, top, math.ceil(x + w / 2 + rw / 2) - left, math.ceil(y + h / 2 + rh / 2) - top
+
+    def pose_on_border(self):
+        self.x, self.border_y, self.angle, _edge = self.border.pose(self.border_s)
+
+    @property
+    def falling(self):
+        return self._dropping
+
+    @property
+    def trick_t(self):
+        """Seconds into the current trick's phase."""
+        return self._roam_t
+
+    def rotated_half(self):
+        """Half his width and height on screen at the current angle."""
+        cos, sin = abs(math.cos(self.angle)), abs(math.sin(self.angle))
+        return (cos * self.sp.w + sin * self.sp.h) / 2, (sin * self.sp.w + cos * self.sp.h) / 2
+
+    def set_roam(self, roam):
+        """Leave the border for the floor; with roaming off, at once."""
+        self.return_to_floor()
+        self._join_border = False
+        self.roam = roam
+        if roam == "off":
+            self.border_y = None
+            self.angle = 0.0
+            self._dropping = False
+
+    def set_border(self, border):
+        """A new screen size or body size: keep his place on the border by edge
+        and fraction, or keep a fall going from where it now is."""
+        old, self.border = self.border, border
+        if old and self.border_s is not None:
+            self.border_s = border.distance(*old.location(self.border_s))
+            self.pose_on_border()
+        elif self._dropping:
+            self.border_y = min(self.border_y, border.bottom)
+            self._fall_start_y = self._fall_y = self.border_y
+            self._fall_angle = self.angle
+
+    def grab(self, free):
+        """Picked up by the pointer. `free` lifts him off the border altogether,
+        so he can be carried in both axes."""
+        self.cancel_roam_action()
+        self._join_border = self._stroll = False
+        if self.mode == "patrol":
+            self.set_mode("idle")
+        if free:
+            self.dragging = True
+            self.border_s = None
+            self._dropping = False
+            self.y_off = 0.0
+
+    def release(self, stick):
+        """Let go at the current x / border_y: onto the nearest edge when that is
+        within `stick` px, otherwise he falls to the floor from where he was."""
+        self.dragging = False
+        d = self.border.nearest(self.x, self.border_y)
+        px, py, _a, _edge = self.border.pose(d)
+        if math.hypot(px - self.x, py - self.border_y) <= stick:
+            self.border_s = d
+            self.pose_on_border()
+        else:
+            self.return_to_floor()
+
+    def return_to_floor(self):
+        """Release the border without teleporting or losing a work event."""
+        self.cancel_roam_action()
+        if self.border_y is None or self._dropping or self.dragging:
+            return
+        self.border_s = None
+        self._stroll = False
+        self._dropping = True
+        self._fall_speed = 0.0
+        self.angle = (self.angle + math.pi) % (2 * math.pi) - math.pi
+        self._fall_angle = self.angle
+        self._fall_start_y = self.border_y
+        self._fall_y = self.border_y
+
+    def _update_border(self, dt):
+        if self.mode != "patrol":
+            self._join_border = False
+        if self.border_s is not None and (self.roam != "border" or not self.can_roam):
+            self.return_to_floor()
+        if self._dropping:
+            self._fall_speed += 1800 * dt
+            self._fall_y = min(self.border.bottom, self._fall_y + self._fall_speed * dt)
+            distance = self.border.bottom - self._fall_start_y
+            progress = (min(1.0, max(0.0, (self._fall_y - self._fall_start_y) / distance))
+                        if distance > 1e-6 else 1.0)
+            self.angle = self._fall_angle * (1.0 - progress) ** 2
+            self.x += max(-SETTLE_SPEED * dt, min(SETTLE_SPEED * dt, self.clamp(self.x) - self.x))
+            half = (abs(math.cos(self.angle)) * self.sp.w
+                    + abs(math.sin(self.angle)) * self.sp.h) / 2 + EDGE_MARGIN
+            self.x = min(max(self.x, half), self.wrap_w - half)
+            half_h = (abs(math.sin(self.angle)) * self.sp.w
+                      + abs(math.cos(self.angle)) * self.sp.h) / 2 + GROUND_MARGIN
+            self.border_y = max(half_h, min(self.border.height - half_h, self._fall_y))
+            if progress >= 1.0:
+                self.border_y = None
+                self.angle = 0.0
+                self._dropping = False
+                self.home_x = self.clamp(self.x)
+                self.puff_until = time.time() + PUFF_SECS if self.mode == "working" else 0.0
+                if distance > self.sp.h / 4:
+                    self.landings += 1
+                    self.impact = min(1.0, self._fall_speed / 1000)
+                if self.mode == "working":
+                    self._play(self._work_anim())
+
+    @property
+    def on_wall(self):
+        """On the border, but neither standing on the floor nor hanging from the
+        ceiling - the two places a nap makes sense."""
+        return self.border_s is not None and -0.98 < math.cos(self.angle) < 0.9
+
+    @property
+    def hanging_sleep(self):
+        return (self.mode == "sleep" and self.border_s is not None
+                and math.cos(self.angle) < -0.98)
+
+    def available_tricks(self):
+        if (self.roam != "border" or not self.border or self.dragging or self._dropping
+                or self.roam_action or self.mode not in ("idle", "patrol")):
+            return ()
+        if self.border_y is None or (self.border_s is not None and abs(self.angle) < 0.02):
+            return ("peek",)
+        if self.border_s is not None and math.cos(self.angle) < -0.999:
+            return ("drop",)
+        if self.border_s is not None and abs(math.cos(self.angle)) < 0.02:
+            return ("slide",)
+        return ()
+
+    def cancel_roam_action(self):
+        self.roam_action = None
+        self.roam_phase = ""
+
+    def start_roam_action(self, action, now):
+        if action not in self.available_tricks():
+            return False
+        self.mode = "idle"
+        self._stroll = self._join_border = False
+        self.roam_action, self.roam_phase = action, "prepare"
+        self._roam_t = 0.0
+        self._play("idle")
+        if action == "peek":
+            self.border_s = self.border_y = None
+            self.angle = 0.0
+            self._peek_side = -1 if self.x <= self.wrap_w / 2 else 1
+            self.facing = self._peek_side
+            self.roam_phase = "approach"
+            self._play("patrol")
+        elif action == "slide":
+            self._slide_dir = -1 if math.sin(self.angle) < 0 else 1
+            target = (self.border.horizontal - min(30, self.border.horizontal / 2)
+                      if self._slide_dir < 0 else min(30, self.border.horizontal / 2))
+            self._slide_left = ((target - self.border_s) * self._slide_dir) % self.border.length
+            self._slide_speed = 0.0
+            self.facing = self._slide_dir
+        return True
+
+    def _finish_roam_action(self, now):
+        self.cancel_roam_action()
+        self._next_decision = now + random.uniform(8, 15)
+        self._play("idle")
+
+    def _update_roam_action(self, dt, now):
+        self._advance(dt)
+        self._roam_t += dt
+        if self.roam_action == "peek":
+            if self.roam_phase == "hold":
+                if self._roam_t >= 2.2:
+                    self.roam_phase = "return"
+                    self._play("patrol")
+                return
+            target = (0.0 if self._peek_side < 0 else self.wrap_w)
+            if self.roam_phase == "return":
+                target = self.min_x if self._peek_side < 0 else self.max_x
+            delta = target - self.x
+            self.x += math.copysign(min(abs(delta), PATROL_SPEED * dt), delta)
+            if abs(self.x - target) < 1e-6:
+                if self.roam_phase == "approach":
+                    self.roam_phase = "hold"
+                    self._roam_t = 0.0
+                    self.facing = -self._peek_side
+                    self._play("idle")
+                else:
+                    self._finish_roam_action(now)
+        elif self.roam_action == "slide":
+            self._slide_speed = min(SLIDE_SPEED, self._slide_speed + 220 * dt)
+            step = min(self._slide_left, self._slide_speed * dt)
+            self._slide_left -= step
+            self.border_s = (self.border_s + self._slide_dir * step) % self.border.length
+            self.pose_on_border()
+            if self._slide_left < 1e-6:
+                self.home_x = self.clamp(self.x)
+                self.landings += 1
+                self.impact = 0.3
+                self._finish_roam_action(now)
+        elif self.roam_action == "drop" and self._roam_t >= 0.4:
+            self._finish_roam_action(now)
+            self.return_to_floor()
+
+    @property
+    def can_roam(self):
+        if self.mode in ("idle", "patrol", "sleep"):
+            return True
+        return (self.mode in ("cue", "wake")
+                and (self._cue_into or self._cue or "idle") in ("idle", "patrol", "sleep"))
+
+    @property
+    def border_velocity(self):
+        if self.border_s is not None:
+            return self._dir * BORDER_SPEED if self.mode == "patrol" else 0.0
+        return None
 
     # ------------------------------------------------------------ transitions
     def set_costume(self, costume, now=None):
@@ -228,6 +471,10 @@ class Creature:
         self._enter(mode, duration)
 
     def _enter(self, mode, duration=0.0):
+        if mode != "idle":
+            self.cancel_roam_action()
+        if mode in ("working", "jump", "error"):
+            self.return_to_floor()
         if mode != self.mode:
             print(f"mode {self.mode} -> {mode}"
                   + (f" (costume {self.costume})" if self.costume else ""), flush=True)
@@ -243,6 +490,7 @@ class Creature:
             self.working_since = time.time()
             self._play(self._work_anim())
         elif mode == "sleep":
+            self.costume = None
             self._play("sleep")
         elif mode == "error":
             # Costume off: the outfit says what he is doing, and he is not doing
@@ -288,6 +536,7 @@ class Creature:
         """Play a one-shot over the top of whatever he is doing, then go back."""
         if self.mode in ("jump", "sleep", "wake"):
             return
+        self.cancel_roam_action()
         if self.mode != "cue":
             # A cue raised during a cue must not park "cue" as the mode to
             # return to. It did, and `_enter("cue")` is a mode nothing drives:
@@ -319,7 +568,12 @@ class Creature:
 
     # ------------------------------------------------------------------ tick
     def update(self, dt, now):
-        if self.mode == "jump":
+        if self.dragging:
+            self._advance(dt)
+            return
+        if self.roam_action:
+            self._update_roam_action(dt, now)
+        elif self.mode == "jump":
             self._update_jump(dt)
         elif self.mode in ("wake", "cue"):
             self._update_oneshot(dt)
@@ -329,6 +583,7 @@ class Creature:
             self._update_idle(dt, now)
         else:
             self._advance(dt)
+        self._update_border(dt)
         self._settle(dt)
 
         # Working is a state we only ever hear about second hand, so it needs a
@@ -350,10 +605,14 @@ class Creature:
             self.set_costume("cook", now)
 
         # Fall asleep when nothing has poked him for a while.
-        if self.mode in ("idle", "patrol") and now - self.last_activity > self.idle_secs:
-            self.mode = "sleep"
-            self.costume = None
-            self._play("sleep")
+        if (self.mode in ("idle", "patrol") and now - self.last_activity > self.idle_secs
+                and not self.roam_action and not self._dropping and not self.dragging):
+            if self.on_wall:
+                # nobody naps sideways: slide down first, or let go and drop
+                if not self.start_roam_action("slide", now):
+                    self.return_to_floor()
+            else:
+                self._enter("sleep")
 
     def _advance(self, dt):
         """Step the current animation; returns True when a one-shot finishes."""
@@ -382,6 +641,9 @@ class Creature:
         self._enter(nxt)
 
     def _update_idle(self, dt, now):
+        if self._dropping:
+            self._advance(dt)
+            return
         if self.anim == "blink" and self._advance(dt):
             self._play("idle")
             return
@@ -392,6 +654,12 @@ class Creature:
             self._next_blink = now + random.uniform(3, 7)
         elif now > self._next_decision:
             self._next_decision = now + random.uniform(5, 10)
+            choices = self.available_tricks()
+            if choices == ("peek",) and min(self.x, self.wrap_w - self.x) > self.sp.w * 2:
+                choices = ()
+            if choices and random.random() < TRICK_CHANCE:
+                self.start_roam_action(choices[0], now)
+                return
             if random.random() < 0.6:
                 if self.roam != "off" and random.random() < STROLL_CHANCE:
                     self.start_patrol(now, random.uniform(*STROLL_SECS), stroll=True)
@@ -399,15 +667,50 @@ class Creature:
                     self.start_patrol(now, random.uniform(1.5, 4.0))
 
     def start_patrol(self, now, secs, direction=None, stroll=False):
+        if self.dragging or self._dropping:
+            return
+        self.cancel_roam_action()
         self.mode = "patrol"
         self._stroll = stroll and bool(self.wrap_w)
         self._dir = direction or random.choice((-1, 1))
         self.facing = self._dir
         self._patrol_until = now + secs
         self._play("patrol")
+        if self.roam == "border" and self.border and not self._dropping:
+            if self.border_s is not None or self._stroll:
+                if self.border_s is None:
+                    distance = self.border.floor_distance(self.x)
+                    target = self.border.pose(distance)[0]
+                    if abs(target - self.x) > 1:
+                        self._join_border = True
+                    else:
+                        self.border_s = distance
+                if self.border_s is not None:
+                    self.pose_on_border()
 
     def _update_patrol(self, dt, now):
         self._advance(dt)
+        if self._join_border and self.roam == "border" and self.border:
+            distance = self.border.floor_distance(self.x)
+            target = self.border.pose(distance)[0]
+            delta = target - self.x
+            self.x += math.copysign(min(abs(delta), PATROL_SPEED * dt), delta)
+            self.facing = 1 if delta >= 0 else -1
+            if abs(target - self.x) < 0.01:
+                self._join_border = False
+                self.border_s = distance
+                self.pose_on_border()
+            return
+        if self.border_s is not None:
+            self.border_s = (self.border_s + self._dir * BORDER_SPEED * dt) % self.border.length
+            self.pose_on_border()
+            self.facing = self._dir
+            if now > self._patrol_until:
+                self._stroll = False
+                self.mode = "idle"
+                self._next_decision = now + random.uniform(4, 9)
+                self._play("idle")
+            return
         if self._stroll:
             self._update_stroll(dt, now)
             return
@@ -448,7 +751,7 @@ class Creature:
 
     def ghost_dx(self):
         """Offset of the second copy of him while he straddles a screen edge, or 0."""
-        if not self.wrap_w:
+        if not self.wrap_w or self.border_y is not None or self.roam == "border":
             return 0
         half = self.sp.w / 2
         if self.x + half > self.wrap_w:
@@ -460,7 +763,8 @@ class Creature:
     def _settle(self, dt):
         """Anything that stopped a stroll mid-crossing leaves him half off screen;
         walk him the rest of the way in rather than snapping him there."""
-        if self.mode == "patrol" and self._stroll:
+        if (self.roam_action == "peek" or self.border_y is not None
+                or (self.mode == "patrol" and self._stroll)):
             return
         if self.mode != "patrol":
             self._stroll = False
@@ -596,6 +900,7 @@ class Deck(Gtk.Window):
         self.creature.roam = self.roam
         self.rig = vector.Rig()
         self._fence()
+        self._restore_border_home()
 
         self.set_app_paintable(True)
         visual = self.get_screen().get_rgba_visual()
@@ -761,9 +1066,12 @@ class Deck(Gtk.Window):
         """Right-click -> Roam. Remembered in prefs.json."""
         if roam == self.roam:
             return
-        self.roam = self.creature.roam = roam
+        self._cancel_drag()
+        self.creature.set_roam(roam)
+        self.roam = roam
         self._place_window()
-        self.creature.x = self.creature.clamp(self.creature.x)
+        if self.creature.border_s is None:
+            self.creature.x = self.creature.clamp(self.creature.x)
         self._save_prefs()
         print(f"roam -> {roam}", flush=True)
 
@@ -778,7 +1086,8 @@ class Deck(Gtk.Window):
         self._sidekicks.clear()
         self._walk.clear()
         self._place_window()
-        self.creature.x = self.creature.clamp(self.creature.x)
+        if self.creature.border_s is None:
+            self.creature.x = self.creature.clamp(self.creature.x)
         self._last_key = None
         self.queue_draw()
         self._save_prefs()
@@ -786,24 +1095,44 @@ class Deck(Gtk.Window):
 
     def _fence(self):
         """Keep his whole body on screen, however wide the strip currently is."""
+        self.creature.cancel_roam_action()
         half = self.sp.w / 2
         self.creature.set_limits(half + EDGE_MARGIN, self.win_w - half - EDGE_MARGIN)
         self.creature.wrap_w = self.win_w
+        self.creature.set_border(
+            roam.Border(self.win_w, self.win_h, self.sp.w, self.sp.h, GROUND_MARGIN))
 
     def _refit(self):
         """Screen layout changed - re-hug the primary monitor."""
+        self._cancel_drag()
         x, y = self._place_window()
         print(f"refit to {self.win_w}x{self.win_h}+{x}+{y}", flush=True)
 
     def _load_home(self, default):
         try:
-            return json.loads(POS.read_text())["home_x"]
+            x = float(json.loads(POS.read_text())["home_x"])
+            return x if math.isfinite(x) else default
         except Exception:
             return default
 
+    def _restore_border_home(self):
+        if self.roam != "border":
+            return
+        try:
+            saved = json.loads(POS.read_text())
+            c = self.creature
+            c.border_s = c.border.distance(saved["edge"], saved["position"])
+            c.pose_on_border()
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+
     def _save_home(self):
         try:
-            POS.write_text(json.dumps({"home_x": int(self.creature.home_x)}))
+            c = self.creature
+            saved = {"home_x": int(c.home_x)}
+            if self.roam == "border" and c.border_s is not None:
+                saved["edge"], saved["position"] = c.border.location(c.border_s)
+            POS.write_text(json.dumps(saved))
         except OSError:
             pass
 
@@ -882,6 +1211,8 @@ class Deck(Gtk.Window):
 
     # ---------------------------------------------------------------- approvals
     def _focused(self, session_id):
+        if getattr(self, "_fullscreen_app", False):
+            return True  # hidden buddy leaves permission requests in the terminal
         s = self.store.sessions.get(session_id) if self.store else None
         if s is None:
             return None
@@ -911,6 +1242,7 @@ class Deck(Gtk.Window):
             print(f"holding prompt {req!r}", flush=True)
             c = self.creature
             c.last_activity = time.time()
+            c.return_to_floor()
             if c.mode == "sleep":
                 c.set_mode("idle")
             c.cue("wave")
@@ -1009,20 +1341,16 @@ class Deck(Gtk.Window):
         print(f"alert {a.kind}: {a.message}", flush=True)
         c = self.creature
         c.last_activity = now
+        c.return_to_floor()
         if c.mode == "sleep":
             c.set_mode("idle")     # being asked a question is a reason to wake up
         c.cue("wave")
 
     @property
     def readout_y(self):
-        """Where the bubble's tail sits: just above his head, and it rides with him.
-
-        The first version parked it above the tallest possible hop so a jump could
-        never reach it. That bought a permanent 130px of empty sky and a bubble
-        that read as an unrelated notification. Following his head costs a few
-        more repaints during a jump and is what makes it look like he is talking.
-        """
-        return self.ground_y - self.sp.h - self.creature.y_off - BUBBLE_GAP
+        """Bottom of the upright readout, using the same placement as drawing."""
+        _x, y, _w, h = self._readout_geometry()
+        return y + h
 
     def update_readout(self, now):
         """Text and fade for the bubble, and the rows behind the hover panel.
@@ -1225,9 +1553,34 @@ class Deck(Gtk.Window):
         widget = self.readout_widget()
         if not widget.visible or (widget is self.bubble and self.readout_alpha(now) <= 0):
             return None
-        w, h = widget.size()
-        x, y = place(self.readout_cx, self.readout_y, w, h, self.win_w)
-        return (x, y, w, h)
+        return self._readout_geometry(widget)
+
+    def _readout_geometry(self, widget=None):
+        """One origin for drawing, click targets and damaged/input regions."""
+        widget = widget or self.readout_widget()
+        c = self.creature
+        body, edge = c.bbox(self.ground_y), "floor"
+        if c.border_s is not None:
+            edge = c.border.pose(c.border_s)[3]
+        elif c.dragging:
+            edge = min(((c.border_y, "ceiling"), (self.win_h - c.border_y, "floor"),
+                        (c.x, "left"), (self.win_w - c.x, "right")))[1]
+        if self._hover_sid and widget is self.panel:
+            for sid, rect in self._avatar_rects:
+                if sid == self._hover_sid:
+                    body, edge = self.drawn_rect(sid, rect), "floor"
+                    break
+        if widget is self.bubble:
+            widget.tail = {"floor": "bottom", "ceiling": "top",
+                           "left": "left", "right": "right"}[edge]
+        rect, tail = roam.readout_placement(body, edge, widget.size(),
+                                           (self.win_w, self.win_h), BUBBLE_GAP)
+        if widget is self.bubble:
+            widget.tail = tail
+            bx, by, bw, bh = body
+            widget.tail_at = int(by + bh / 2 - rect[1] if tail in ("left", "right")
+                                 else bx + bw / 2 - rect[0])
+        return rect
 
     def readout_widget(self):
         """Card over panel over bubble: a question for you outranks a hover."""
@@ -1237,12 +1590,8 @@ class Deck(Gtk.Window):
 
     @property
     def readout_cx(self):
-        """Above whichever body the readout is about: an avatar when hovering one."""
-        if self._hover_sid and not self.card.visible:
-            for sid, (x, _y, w, _h) in self._avatar_rects:
-                if sid == self._hover_sid:
-                    return x + w / 2
-        return self.creature.x
+        x, _y, w, _h = self._readout_geometry()
+        return x + w / 2
 
     DEMO = [
         ("idle", 4.0), ("patrol", 6.0), ("wave", 2.0),
@@ -1311,6 +1660,7 @@ class Deck(Gtk.Window):
         now = time.time()
         dt = min(now - self._last_t, 0.2)
         self._last_t = now
+        self.poll_fullscreen(now)
 
         if self.args.demo:
             self.run_demo(now)
@@ -1357,7 +1707,9 @@ class Deck(Gtk.Window):
         key = (c.anim, c.frame, c.facing, bbox, phase, readout, moving, tuple(others))
         if key != getattr(self, "_last_key", None):
             self._last_key = key
-            pad = 90  # room for props, sparkles and the zzz trail
+            body_pad = max(90, self.sp.scale * 16 + 40) if c.mode == "sleep" else 90
+            pad = max(body_pad, getattr(self, "_last_body_pad", body_pad))
+            self._last_body_pad = body_pad
             ghost = c.ghost_dx()
             bodies = [bbox] + ([(bbox[0] + ghost,) + bbox[1:]] if ghost else [])
             for b in filter(None, [*getattr(self, "_last_bodies", ()), *bodies]):
@@ -1378,12 +1730,51 @@ class Deck(Gtk.Window):
 
         # Tick only as fast as the current posture needs. Motion wants 30Hz; standing
         # still only has to outrun the animation's own fps, and sleeping barely that.
-        want = MODE_HZ.get(c.mode, TICK_HZ)
+        want = (TICK_HZ if c.dragging or c.falling or c.roam_action
+                else MODE_HZ.get(c.mode, TICK_HZ))
         if want != getattr(self, "_hz", TICK_HZ):
             self._hz = want
             GLib.timeout_add(1000 // want, self.tick)
             return False
         return True
+
+    def poll_fullscreen(self, now):
+        """Hide while another app is full-screen: a video or a game, say.
+
+        Asked on the main loop with no fork (see `windows.fullscreen_window`),
+        once a second, every few while he sleeps. A full-screen terminal running
+        one of the sessions does not count: that is where you are working, and
+        he is how you see what it is doing.
+        """
+        if self.args.demo or now < getattr(self, "_fullscreen_next", 0):
+            return
+        self._fullscreen_next = now + (FULLSCREEN_POLL_ASLEEP if self.creature.mode == "sleep"
+                                       else FULLSCREEN_POLL)
+        xid = windows.fullscreen_window()
+        if xid is None:
+            return
+        active = bool(xid) and not self._is_session_terminal(xid)
+        if active == getattr(self, "_fullscreen_app", False):
+            return
+        self._fullscreen_app = active
+        if active:
+            self.approvals.release()
+            self._cancel_drag()
+            self.creature.return_to_floor()
+            self.hide()
+        else:
+            self.show()
+
+    def _is_session_terminal(self, xid):
+        """Does this window belong to a live session? Cached per window and set
+        of sessions, because the lookup can fork when libwnck is missing."""
+        sessions = self.store.sessions.values() if self.store else ()
+        key = (xid, tuple(sorted(s.id for s in sessions)))
+        if key != getattr(self, "_terminal_key", None):
+            self._terminal_key = key
+            hits = (windows.find(s.pids, s.project) for s in sessions if s.pids)
+            self._terminal_hit = any(hit and hit[0].get_xid() == xid for hit in hits)
+        return self._terminal_hit
 
     def update_pop(self, dt):
         costume = self.creature.costume if self.creature.mode == "working" else None
@@ -1425,6 +1816,11 @@ class Deck(Gtk.Window):
                 expression = "thinking"
             elif s and s.state == "working" and s.phase == "responding":
                 expression = "writing"
+        if expression is None:
+            if c.roam_action == "peek":
+                expression = "curious"
+            elif c.roam_action in ("slide", "drop") or c.falling:
+                expression = "surprised"
         # Nothing to do and nobody asking: headphones on until there is.
         # Sleep, a session starting work, or a prompt all take them off.
         listening = (expression is None and c.mode in ("idle", "patrol")
@@ -1444,6 +1840,8 @@ class Deck(Gtk.Window):
             dx = (px - (bx + bw / 2)) / max(1.0, bw * 1.5) * c.facing
             dy = (py - (by + bh * 0.45)) / max(1.0, bh * 1.5)
             face.look(dx, dy, hold=0.3)
+        elif c.roam_action == "peek" and c.roam_phase == "hold":
+            face.look(0.85, math.sin(c.trick_t * 2) * 0.35, hold=0.3)
 
     # ------------------------------------------------------------- the others
     @staticmethod
@@ -1465,7 +1863,9 @@ class Deck(Gtk.Window):
                                                and self._prev_featured != featured.id) else None
         self._prev_featured = featured.id if featured else None
         aw, ah = self.sp.w // AVATAR_DIV, self.sp.h // AVATAR_DIV
-        row = layout.avatar_row(c.x, self.sp.w, self.ground_y, (aw, ah),
+        # off on a wall or the ceiling he leaves them standing round his home spot
+        anchor = c.home_x if c.border_y is not None else c.x
+        row = layout.avatar_row(anchor, self.sp.w, self.ground_y, (aw, ah),
                                 len(others), self.win_w)
         ids = [s.id for s in others[:len(row.rects)]]
         if row.side < 0:
@@ -1475,7 +1875,7 @@ class Deck(Gtk.Window):
 
         agents = featured.agents if featured else []
         kw, kh = self.sp.w // SIDEKICK_DIV, self.sp.h // SIDEKICK_DIV
-        krow = layout.sidekick_row(c.x, self.sp.w, self.ground_y, (kw, kh),
+        krow = layout.sidekick_row(anchor, self.sp.w, self.ground_y, (kw, kh),
                                    len(agents), self.win_w, avoid=row.side if others else 0)
         kids = [str(a.get("id", i)) for i, a in enumerate(agents[:len(krow.rects)])]
         if krow.side < 0:
@@ -1619,6 +2019,9 @@ class Deck(Gtk.Window):
             return
         x, y, w, h = bbox
         region = cairo.Region(cairo.RectangleInt(x, y, w, h))
+        ghost = self.creature.ghost_dx()
+        if ghost:
+            region.union(cairo.RectangleInt(x + ghost, y, w, h))
         if readout:
             rx, ry, rw, rh = readout
             region.union(cairo.RectangleInt(rx, ry, rw, rh))
@@ -1631,14 +2034,16 @@ class Deck(Gtk.Window):
     def _draw_body(self, cr, c, now):
         """Him, his shadow and everything that rides on him."""
         s = self.sp.scale
-        x, y, w, h = c.bbox(self.ground_y)
+        x, y, w, h = c.body_bbox(self.ground_y)
         # Ground shadow: tightens as he rises, which is what sells the jump height.
-        if c.mode != "sleep":
+        # On the border it sits under his feet in the rotated frame, so a wall or
+        # the ceiling gets one too; held or falling, he is touching nothing.
+        if c.mode != "sleep" and not (c.dragging or c.falling):
             tier = 0 if c.y_off < 6 else (1 if c.y_off < 26 else 2)
             key = vector.prop_key("shadow", tier)
             sw, sh = vector.prop_size(key)
-            vector.draw_prop(cr, key, c.x - sw * s / 2,
-                             self.ground_y - sh * s, s)
+            feet = self.ground_y if c.border_y is None else y + h + c.y_off
+            vector.draw_prop(cr, key, c.x - sw * s / 2, feet - sh * s, s)
 
         # Costumes the rig draws itself ride his body; only anything left in
         # the old keyframed table is still pinned on from out here.
@@ -1696,6 +2101,12 @@ class Deck(Gtk.Window):
         for dx in (0, ghost) if ghost else (0,):
             cr.save()
             cr.translate(dx, 0)
+            if c.angle:
+                bx, by, bw, bh = c.body_bbox(self.ground_y)
+                cx, cy = bx + bw / 2, by + bh / 2
+                cr.translate(cx, cy)
+                cr.rotate(c.angle)
+                cr.translate(-cx, -cy)
             self._draw_body(cr, c, now)
             cr.restore()
 
@@ -1707,25 +2118,28 @@ class Deck(Gtk.Window):
         # than stacking under it: the bubble's line is already the panel's `step`
         # row, and stacking would need a strip half again as tall.
         pop = self._pop.x
+        rect = self._readout_geometry()
+        origin = rect[:2]
         if self.card.visible:
-            self._card_rect = self.card.draw(cr, c.x, self.readout_y, self.win_w, scale=pop)
+            self._card_rect = self.card.draw(cr, c.x, self.readout_y, self.win_w,
+                                             scale=pop, origin=origin)
         elif self.panel.visible:
-            self.panel.draw(cr, self.readout_cx, self.readout_y, self.win_w, scale=pop)
+            self.panel.draw(cr, self.readout_cx, self.readout_y, self.win_w,
+                            scale=pop, origin=origin)
         else:
             self.bubble.draw(cr, c.x, self.readout_y, self.win_w,
-                             self.readout_alpha(now), scale=pop)
+                             self.readout_alpha(now), scale=pop, origin=origin)
 
         if c.mode == "sleep":
-            phase = now % 3.0
-            for i in range(3):
-                t = (phase - i * 0.9) / 2.4
-                if 0 < t < 1:
-                    cr.save()
-                    cr.translate(x + w + 4 + t * 26, y + h * 0.2 - t * 46)
-                    cr.scale(0.6 + t, 0.6 + t)
-                    vector.draw_prop(cr, "zzz", 0, 0, s,
-                                     alpha=max(0.0, 1.0 - t))
-                    cr.restore()
+            gw, gh = vector.prop_size("zzz")
+            for zx, zy, size, alpha in roam.sleep_trail(
+                    (x, y, w, h), (gw * s, gh * s), now,
+                    c.hanging_sleep, (self.win_w, self.win_h)):
+                cr.save()
+                cr.translate(zx, zy)
+                cr.scale(size, size)
+                vector.draw_prop(cr, "zzz", 0, 0, s, alpha=alpha)
+                cr.restore()
         return False
 
     # -------------------------------------------------------------- interaction
@@ -1776,8 +2190,7 @@ class Deck(Gtk.Window):
     def _card_button(self, x, y):
         if not self.card.visible:
             return ""
-        w, h = self.card.size()
-        origin = place(self.creature.x, self.readout_y, w, h, self.win_w)
+        origin = self._readout_geometry(self.card)[:2]
         for bid, (bx, by, bw, bh) in self.card.buttons_at(origin).items():
             if bx <= x < bx + bw and by <= y < by + bh:
                 return bid
@@ -1786,6 +2199,13 @@ class Deck(Gtk.Window):
     def _avatar_at(self, x, y):
         i = layout.hit([self.drawn_rect(sid, r) for sid, r in self._avatar_rects], x, y)
         return self._avatar_rects[i][0] if i >= 0 else None
+
+    def _cancel_drag(self):
+        """A disappearing/resized overlay must not leave him held forever."""
+        if self.creature.dragging:
+            self.creature.dragging = False
+            self._drag = None
+            self.creature.return_to_floor()
 
     def on_press(self, _w, ev):
         if ev.button == 1 and self._card_button(ev.x, ev.y):
@@ -1801,7 +2221,9 @@ class Deck(Gtk.Window):
             self._press_btn = "avatar:" + self._avatar_at(ev.x, ev.y)
             return True
         if ev.button == 1:
-            self._drag = (ev.x_root, self.creature.x)
+            c = self.creature
+            _bx, by, _bw, bh = c.body_bbox(self.ground_y)
+            self._drag = (ev.x_root, getattr(ev, "y_root", 0.0), c.x, by + bh / 2)
             self._dragged = False
             self.creature.last_activity = time.time()
             if self.creature.mode == "sleep":
@@ -1812,11 +2234,21 @@ class Deck(Gtk.Window):
 
     def on_motion(self, _w, ev):
         if self._drag:
-            start_root, start_x = self._drag
-            if abs(ev.x_root - start_root) > 3:
-                self._dragged = True
-            self.creature.x = self.creature.clamp(start_x + (ev.x_root - start_root))
-            self.creature.home_x = self.creature.x
+            root_x, root_y, start_x, start_y = self._drag
+            dx, dy = ev.x_root - root_x, getattr(ev, "y_root", root_y) - root_y
+            if math.hypot(dx, dy) <= 3 and not self._dragged:
+                return True
+            self._dragged = True
+            c = self.creature
+            c.grab(free=self.roam == "border")
+            if self.roam == "border":
+                hx, hy = c.rotated_half()
+                c.x = max(hx + EDGE_MARGIN, min(self.win_w - hx - EDGE_MARGIN, start_x + dx))
+                c.border_y = max(hy + GROUND_MARGIN,
+                                 min(self.win_h - hy - GROUND_MARGIN, start_y + dy))
+            else:
+                c.x = c.clamp(start_x + dx)
+            c.home_x = c.clamp(c.x)
             return True
         # Motion only reaches us inside the input shape, so being here at all means
         # the pointer is on him, the readout, or another session's avatar.
@@ -1848,7 +2280,15 @@ class Deck(Gtk.Window):
         if self._drag:
             dragged, self._drag = self._dragged, None
             if dragged:
+                c = self.creature
+                c.dragging = False
+                if self.roam == "border":
+                    # near an edge he grabs hold of it; out in the open he drops
+                    c.release(stick=self.sp.h)
                 self._save_home()
+                if (not c.can_roam
+                        or self.alerts.pending() or self.approvals.current()):
+                    c.return_to_floor()
             else:
                 # Order matters. Jumping happens first because it is the reason
                 # you clicked; acknowledging is a side effect of having arrived,
@@ -1910,11 +2350,19 @@ class Deck(Gtk.Window):
     def go_stroll(self):
         """Menu: a stroll now, so the wrap can be seen without waiting for one."""
         c = self.creature
-        if self.roam == "off" or c.mode not in ("idle", "patrol"):
+        if self.roam == "off" or c.mode not in ("idle", "patrol") or c.dragging or c.falling:
             self.say("Roaming is off" if self.roam == "off" else "Busy right now", 2.0)
             return
         c.last_activity = time.time()
-        c.start_patrol(time.time(), random.uniform(*STROLL_SECS), stroll=True)
+        secs = (c.border.length / BORDER_SPEED if self.roam == "border" and c.border
+                else random.uniform(*STROLL_SECS))
+        c.start_patrol(time.time(), secs, stroll=True)
+
+    def roam_trick(self, action):
+        if self.creature.start_roam_action(action, time.time()):
+            self.creature.last_activity = time.time()
+        else:
+            self.say("Busy right now", 2.0)
 
     def menu(self, ev):
         m = Gtk.Menu()
@@ -1974,6 +2422,9 @@ class Deck(Gtk.Window):
             ("Headphones on", lambda *_: self.put_on_headphones(time.time())),
             ("Go for a stroll", lambda *_: self.go_stroll()),
         ]
+        labels = {"peek": "Peek at edge", "slide": "Slide down wall", "drop": "Drop from ceiling"}
+        items += [(labels[action], lambda *_args, a=action: self.roam_trick(a))
+                  for action in self.creature.available_tricks()]
         items += [
             (f"Costume: {name}", lambda _i, n=name: (
                 self.creature.set_mode("working"), self.creature.set_costume(n)))

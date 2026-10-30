@@ -62,6 +62,57 @@ SKIP_TYPES = {"dock", "desktop", "menu", "splashscreen", "toolbar"}
 MAX_DEPTH = 10
 
 
+def fullscreen_window():
+    """XID of the active window if it is full-screen, 0 if not, None if unknown.
+
+    Main-loop only, and cheap enough to ask every second: no thread and no
+    fork. libwnck reads the real _NET_WM_STATE from its own event-driven cache.
+    Without it the answer is the shape of the window: one covering its whole
+    monitor, top bar included, is full-screen - a maximized one stops at the
+    panels. Native Wayland windows hidden from XWayland cannot be detected.
+    """
+    try:
+        wnck = _wnck_screen()
+        if wnck is not None:
+            w = wnck.get_active_window()
+            return w.get_xid() if w is not None and w.is_fullscreen() else 0
+        screen = Gdk.Screen.get_default()
+        active = screen.get_active_window() if screen is not None else None
+        if active is None:
+            return None
+        frame = active.get_frame_extents()
+        display = Gdk.Display.get_default()
+        if hasattr(display, "get_monitor_at_window"):
+            mon = display.get_monitor_at_window(active).get_geometry()
+        else:  # pragma: no cover - GTK < 3.22
+            mon = screen.get_monitor_geometry(screen.get_monitor_at_window(active))
+        covers = (frame.x <= mon.x and frame.y <= mon.y
+                  and frame.x + frame.width >= mon.x + mon.width
+                  and frame.y + frame.height >= mon.y + mon.height)
+        return active.get_xid() if covers else 0
+    except Exception:
+        return None
+
+
+_wnck = None
+
+
+def _wnck_screen():
+    """The libwnck screen, created once; False is cached when there is none."""
+    global _wnck
+    if _wnck is None:
+        try:
+            import gi as _gi
+            _gi.require_version("Wnck", "3.0")
+            from gi.repository import Wnck
+            _wnck = Wnck.Screen.get_default() or False
+            if _wnck:
+                _wnck.force_update()
+        except (ImportError, ValueError):
+            _wnck = False
+    return _wnck or None
+
+
 class Result:
     """What happened, in a form the UI is obliged to look at.
 
